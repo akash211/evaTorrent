@@ -1,2 +1,3 @@
-def hello() -> str:
-    return "Hello from evatorrent!"
+"""evaTorrent ⚡ - Modern BitTorrent Client & Engine."""
+
+__version__ = "0.2.0"

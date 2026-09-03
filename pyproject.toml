@@ -1,11 +1,13 @@
 [project]
 name = "evatorrent"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Modern, high-performance BitTorrent client with asyncio, parallel piece downloading, and a sleek Web UI"
+readme = "README.md"
+license = { text = "MIT" }
 authors = [
     { name = "Akash Kumar", email = "akash211@gmail.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "aiofiles>=24.1.0",
     "aiohttp>=3.10.0",
@@ -15,13 +17,16 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/akash211/evaTorrent"
+Repository = "https://github.com/akash211/evaTorrent"
+
 [project.scripts]
 evatorrent = "evatorrent.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12.0"]
 build-backend = "uv_build"
-
 
 [dependency-groups]
 dev = [
