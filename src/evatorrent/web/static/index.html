@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>evaTorrent ⚡ | Next-Gen BitTorrent Engine</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Bar -->
+    <header class="navbar">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>evaTorrent</h1>
+          <span class="version-tag">v0.1.0 • Asyncio Core</span>
+        </div>
+      </div>
+
+      <div class="nav-stats">
+        <div class="stat-pill">
+          <span class="stat-indicator pulse-cyan"></span>
+          <span class="stat-label">DL</span>
+          <span class="stat-value" id="global-dl-speed">0.00 KB/s</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-indicator pulse-purple"></span>
+          <span class="stat-label">UL</span>
+          <span class="stat-value" id="global-ul-speed">0.00 KB/s</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-label">Active</span>
+          <span class="stat-value highlight" id="global-active-torrents">0</span>
+        </div>
+      </div>
+
+      <div class="nav-actions">
+        <button id="btn-add-torrent" class="btn btn-primary">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          Add Torrent
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="main-layout">
+      <!-- Toolbar / Filters -->
+      <section class="toolbar">
+        <div class="filter-tabs">
+          <button class="filter-tab active" data-filter="all">All Torrents (<span id="count-all">0</span>)</button>
+          <button class="filter-tab" data-filter="downloading">Downloading (<span id="count-dl">0</span>)</button>
+          <button class="filter-tab" data-filter="completed">Completed (<span id="count-done">0</span>)</button>
+          <button class="filter-tab" data-filter="paused">Paused (<span id="count-paused">0</span>)</button>
+        </div>
+        <div class="toolbar-search">
+          <input type="text" id="search-input" placeholder="Search torrents by name or hash..." />
+        </div>
+      </section>
+
+      <!-- Torrent List or Empty State -->
+      <section class="torrent-section">
+        <div id="torrent-list" class="torrent-grid"></div>
+
+        <!-- Empty State -->
+        <div id="empty-state" class="empty-state">
+          <div class="empty-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+          </div>
+          <h3>No Torrents Added Yet</h3>
+          <p>Drop a <code>.torrent</code> file anywhere or click below to start downloading.</p>
+          <button class="btn btn-secondary" onclick="openAddModal()">Add Your First Torrent</button>
+        </div>
+      </section>
+
+      <!-- Detail Inspector Drawer / Modal -->
+      <div id="inspector-overlay" class="inspector-overlay hidden" onclick="closeInspector()"></div>
+      <aside id="inspector-drawer" class="inspector-drawer hidden">
+        <div class="inspector-header">
+          <div class="inspector-title-group">
+            <span class="inspector-badge" id="insp-badge">DOWNLOADING</span>
+            <h2 id="insp-name">Torrent Details</h2>
+            <div class="inspector-hash" id="insp-hash">hash</div>
+          </div>
+          <button class="btn-icon" onclick="closeInspector()" title="Close details">&times;</button>
+        </div>
+
+        <div class="inspector-tabs">
+          <button class="tab-btn active" onclick="switchInspectorTab('overview')">Overview</button>
+          <button class="tab-btn" onclick="switchInspectorTab('pieces')">Piece Map</button>
+          <button class="tab-btn" onclick="switchInspectorTab('peers')">Peers</button>
+          <button class="tab-btn" onclick="switchInspectorTab('files')">Files</button>
+        </div>
+
+        <div class="inspector-body">
+          <!-- Tab: Overview -->
+          <div id="tab-overview" class="tab-content active">
+            <div class="info-grid">
+              <div class="info-item">
+                <span class="info-label">Total Size</span>
+                <span class="info-value" id="insp-size">-</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Downloaded</span>
+                <span class="info-value" id="insp-downloaded">-</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Download Speed</span>
+                <span class="info-value cyan-text" id="insp-dl-speed">-</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Upload Speed</span>
+                <span class="info-value purple-text" id="insp-ul-speed">-</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Estimated Time (ETA)</span>
+                <span class="info-value" id="insp-eta">-</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Swarm Peers</span>
+                <span class="info-value" id="insp-peers">-</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Piece Count</span>
+                <span class="info-value" id="insp-pieces">-</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Piece Length</span>
+                <span class="info-value" id="insp-piece-len">-</span>
+              </div>
+            </div>
+
+            <h4 class="section-subtitle">Trackers</h4>
+            <ul id="insp-trackers" class="trackers-list"></ul>
+          </div>
+
+          <!-- Tab: Pieces Map -->
+          <div id="tab-pieces" class="tab-content">
+            <div class="piece-map-meta">
+              <span>Verified Pieces: <strong id="piece-stat-count">0 / 0</strong></span>
+              <div class="piece-legend">
+                <span class="legend-box complete"></span> Complete
+                <span class="legend-box ongoing"></span> In-Flight
+                <span class="legend-box missing"></span> Missing
+              </div>
+            </div>
+            <div id="piece-grid" class="piece-grid"></div>
+          </div>
+
+          <!-- Tab: Peers -->
+          <div id="tab-peers" class="tab-content">
+            <div class="table-responsive">
+              <table class="peers-table">
+                <thead>
+                  <tr>
+                    <th>IP & Port</th>
+                    <th>Status</th>
+                    <th>Choked</th>
+                    <th>Speed</th>
+                    <th>Downloaded</th>
+                  </tr>
+                </thead>
+                <tbody id="peers-table-body">
+                  <tr><td colspan="5" class="muted">No peers connected</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Tab: Files -->
+          <div id="tab-files" class="tab-content">
+            <ul id="files-list" class="files-list"></ul>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Modal: Add Torrent -->
+    <div id="modal-add" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Add New Torrent</h3>
+          <button class="btn-icon" onclick="closeAddModal()">&times;</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="drop-zone" id="drop-zone">
+            <svg viewBox="0 0 24 24" width="40" height="40" stroke="currentColor" stroke-width="1.5" fill="none">
+              <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"></path>
+              <path d="M12 12v9"></path>
+              <path d="m16 16-4-4-4 4"></path>
+            </svg>
+            <p>Drag & drop your <code>.torrent</code> file here</p>
+            <span>or click to browse from computer</span>
+            <input type="file" id="file-input" accept=".torrent" style="display:none" />
+          </div>
+
+          <div class="modal-divider"><span>OR PASTE MAGNET LINK</span></div>
+
+          <div class="input-group">
+            <input type="text" id="magnet-input" placeholder="magnet:?xt=urn:btih:..." />
+            <button class="btn btn-secondary" onclick="submitMagnet()">Add Magnet</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container" class="toast-container"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
