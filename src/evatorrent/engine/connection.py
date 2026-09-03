@@ -39,6 +39,7 @@ class PeerConnection:
         piece_manager: PieceManager,
         on_disconnect: Optional[Callable[[str], None]] = None,
         is_throttled: Optional[Callable[[], bool]] = None,
+        on_data_received: Optional[Callable[[], None]] = None,
     ):
         self.peer = peer
         self.peer_key = f"{peer.ip}:{peer.port}"
@@ -47,6 +48,7 @@ class PeerConnection:
         self.piece_manager = piece_manager
         self.on_disconnect = on_disconnect
         self.is_throttled = is_throttled
+        self.on_data_received = on_data_received
 
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
@@ -64,8 +66,8 @@ class PeerConnection:
         self._bytes_since_last_check: int = 0
 
         self._task: Optional[asyncio.Task] = None
-        # In-flight block requests: set of (piece_index, begin_offset)
-        self._pending_requests: Set[Tuple[int, int]] = set()
+        # In-flight block requests: map of (piece_index, begin_offset) -> request_timestamp
+        self._pending_requests: Dict[Tuple[int, int], float] = {}
 
     def start(self) -> asyncio.Task:
         self.running = True
@@ -160,8 +162,12 @@ class PeerConnection:
     async def _handle_message(self, msg) -> None:
         if isinstance(msg, Choke):
             self.is_choked = True
+            self._pending_requests.clear()
         elif isinstance(msg, Unchoke):
             self.is_choked = False
+            # If peer sent no Bitfield before unchoking, assume peer has all pieces (e.g. seeder)
+            if self.peer_key not in self.piece_manager.peers:
+                self.piece_manager.peer_has_all_pieces(self.peer_key)
         elif isinstance(msg, Interested):
             pass
         elif isinstance(msg, NotInterested):
@@ -173,8 +179,10 @@ class PeerConnection:
         elif isinstance(msg, Piece):
             self.bytes_downloaded += len(msg.block)
             self._bytes_since_last_check += len(msg.block)
-            # Remove from in-flight requests set
-            self._pending_requests.discard((msg.index, msg.begin))
+            # Remove from in-flight requests map
+            self._pending_requests.pop((msg.index, msg.begin), None)
+            if self.on_data_received:
+                self.on_data_received()
             self.piece_manager.on_block_received(msg.index, msg.begin, msg.block)
         elif isinstance(msg, KeepAlive):
             pass
@@ -191,20 +199,24 @@ class PeerConnection:
                 await asyncio.sleep(0.05)
                 continue
 
+            now = time.time()
+            # Clean expired requests older than 10 seconds to free slots
+            self._pending_requests = {k: ts for k, ts in self._pending_requests.items() if now - ts < 10.0}
+
             available_slots = PIPELINE_CAPACITY - len(self._pending_requests)
             if available_slots <= 0:
-                await asyncio.sleep(0.03)
+                await asyncio.sleep(0.02)
                 continue
 
             blocks = self.piece_manager.next_requests(self.peer_key, max_count=available_slots)
             if blocks:
                 for block in blocks:
                     req_key = (block.piece_index, block.begin)
-                    self._pending_requests.add(req_key)
+                    self._pending_requests[req_key] = now
                     req = Request(index=block.piece_index, begin=block.begin, length=block.length)
                     await self.send_message(req)
             else:
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.1)
 
     def update_speed(self) -> None:
         """Calculates current download speed over the elapsed time interval."""

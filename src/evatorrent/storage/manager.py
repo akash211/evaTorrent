@@ -87,20 +87,9 @@ class PieceManager:
             buf[byte_idx] |= (1 << bit_idx)
         return Bitfield(bytes(buf))
 
-    def _get_rarest_missing_pieces(self, peer_pieces: Set[int]) -> List[int]:
-        """Calculates rarity of missing pieces held by this peer and returns sorted rarest-first."""
-        candidate_pieces = [p for p in self.missing_pieces if p in peer_pieces and p not in self.ongoing_pieces]
-        if not candidate_pieces:
-            return []
-
-        # Count peer frequency for candidates
-        piece_rarity: Dict[int, int] = {}
-        for p in candidate_pieces:
-            count = sum(1 for peer_set in self.peers.values() if p in peer_set)
-            piece_rarity[p] = count
-
-        # Sort by lowest rarity first, then piece index
-        return sorted(candidate_pieces, key=lambda idx: (piece_rarity[idx], idx))
+    def peer_has_all_pieces(self, peer_key: str) -> None:
+        """Marks that a peer (e.g. an unchoking seeder) possesses all pieces."""
+        self.peers[peer_key] = set(range(len(self.pieces)))
 
     def next_requests(self, peer_key: str, max_count: int = 4) -> List[Block]:
         """Pipelined block selector: returns up to max_count blocks to request from this peer."""
@@ -134,10 +123,9 @@ class PieceManager:
                         if len(blocks_to_request) >= max_count:
                             return blocks_to_request
 
-        # 3. Third priority: start new missing pieces using Rarest-First strategy
-        rarest_candidates = self._get_rarest_missing_pieces(peer_pieces)
-        for piece_idx in rarest_candidates:
-            if piece_idx in self.missing_pieces:
+        # 3. Third priority: start new missing pieces that this peer has
+        for piece_idx in sorted(self.missing_pieces):
+            if piece_idx in peer_pieces and piece_idx not in self.ongoing_pieces:
                 self.missing_pieces.remove(piece_idx)
                 self.ongoing_pieces.add(piece_idx)
                 piece = self.pieces[piece_idx]
@@ -147,6 +135,8 @@ class PieceManager:
                         blocks_to_request.append(block)
                         if len(blocks_to_request) >= max_count:
                             return blocks_to_request
+                if len(blocks_to_request) >= max_count:
+                    break
 
         return blocks_to_request
 

@@ -18,8 +18,8 @@ from evatorrent.tracker.manager import TrackerManager
 
 logger = logging.getLogger(__name__)
 
-# Stall timeout: if download is active but no data received for 3 minutes, transition to ERROR
-STALL_TIMEOUT_SECONDS = 180.0
+# Stall timeout: if download is active but no data received for 5 minutes, transition to ERROR
+STALL_TIMEOUT_SECONDS = 300.0
 
 
 class TorrentStatus(str, Enum):
@@ -54,7 +54,7 @@ class TorrentSession:
             download_dir=self.download_dir,
             on_piece_complete=self._on_piece_completed,
         )
-        self.tracker_manager = TrackerManager(torrent.trackers, port=port)
+        self.tracker_manager = TrackerManager(torrent.trackers, port=port, add_fallbacks=True)
 
         self.status: TorrentStatus = TorrentStatus.PENDING
         self.error_message: Optional[str] = None
@@ -74,6 +74,10 @@ class TorrentSession:
         self._last_speed_check: float = time.time()
         self._last_downloaded_bytes: int = 0
         self._last_data_received_time: float = time.time()
+
+    def touch_activity(self) -> None:
+        """Records data activity from swarm to prevent stall timeout."""
+        self._last_data_received_time = time.time()
 
     def is_throttled(self) -> bool:
         """Returns True if the current download speed exceeds the configured per-torrent limit."""
@@ -111,6 +115,8 @@ class TorrentSession:
     def resume(self) -> None:
         if self.status == TorrentStatus.COMPLETED:
             return
+        self.error_message = None
+        self._last_data_received_time = time.time()
         self.start()
 
     async def stop(self) -> None:
@@ -205,12 +211,17 @@ class TorrentSession:
                         )
                         last_announce = now
                         if response and response.peers:
-                            announce_interval = max(60.0, float(response.interval))
                             for p in response.peers:
                                 p_key = f"{p.ip}:{p.port}"
                                 if p_key not in self.seen_peers:
                                     self.seen_peers.add(p_key)
                                     self.peer_queue.put_nowait(p)
+                            if len(self.active_peers) < 5 and self.peer_queue.qsize() < 10:
+                                announce_interval = 60.0
+                            else:
+                                announce_interval = max(120.0, float(response.interval))
+                        else:
+                            announce_interval = 60.0
                     except Exception as e:
                         logger.debug(f"Tracker announce failed: {e}")
                         announce_interval = 60.0
@@ -227,6 +238,7 @@ class TorrentSession:
                             piece_manager=self.piece_manager,
                             on_disconnect=self._on_peer_disconnected,
                             is_throttled=self.is_throttled,
+                            on_data_received=self.touch_activity,
                         )
                         self.active_peers[peer_key] = conn
                         conn.start()

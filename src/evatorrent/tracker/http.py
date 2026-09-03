@@ -55,15 +55,17 @@ class HttpTracker:
             f"downloaded={downloaded}",
             f"left={left}",
             "compact=1",
+            "numwant=100",
         ]
         if event:
             params.append(f"event={event}")
 
         delimiter = "&" if "?" in self.url else "?"
         full_url = f"{self.url}{delimiter}{'&'.join(params)}"
+        headers = {"User-Agent": "evaTorrent/0.2.0"}
 
         try:
-            async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            async with httpx.AsyncClient(timeout=timeout, verify=False, headers=headers) as client:
                 resp = await client.get(full_url)
                 if resp.status_code != 200:
                     logger.debug(f"HTTP tracker {self.url} responded with status {resp.status_code}")

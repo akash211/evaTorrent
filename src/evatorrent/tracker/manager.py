@@ -21,16 +21,29 @@ def generate_peer_id() -> bytes:
     return f"-ET0100-{random_part}".encode("ascii")
 
 
+DEFAULT_FALLBACK_TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://explodie.org:6969/announce",
+]
+
+
 class TrackerManager:
     """Coordinates requests to multiple BitTorrent trackers."""
 
-    def __init__(self, tracker_urls: List[str], port: int = 6881):
-        self.tracker_urls = tracker_urls
+    def __init__(self, tracker_urls: List[str], port: int = 6881, add_fallbacks: bool = False):
+        self.tracker_urls = list(tracker_urls)
+        if add_fallbacks:
+            for fb in DEFAULT_FALLBACK_TRACKERS:
+                if fb not in self.tracker_urls:
+                    self.tracker_urls.append(fb)
+
         self.port = port
         self.peer_id = generate_peer_id()
         self.trackers = []
 
-        for url in tracker_urls:
+        for url in self.tracker_urls:
             url_clean = url.strip()
             if url_clean.startswith(("http://", "https://")):
                 self.trackers.append(HttpTracker(url_clean))
