@@ -127,6 +127,18 @@ async def resume_torrent(info_hash: str):
     return {"success": True}
 
 
+class SpeedLimitRequest(BaseModel):
+    download_limit: Optional[int] = None  # in bytes/sec (0 or null for unlimited)
+
+
+@app.post("/api/torrents/{info_hash}/speed_limit")
+async def set_torrent_speed_limit(info_hash: str, req: SpeedLimitRequest):
+    success = engine_manager.set_speed_limit(info_hash, req.download_limit)
+    if not success:
+        raise HTTPException(status_code=404, detail="Torrent not found")
+    return {"success": True, "download_limit": req.download_limit}
+
+
 @app.delete("/api/torrents/{info_hash}")
 async def delete_torrent(info_hash: str, delete_files: bool = False):
     success = await engine_manager.remove_torrent(info_hash, delete_files=delete_files)

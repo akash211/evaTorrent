@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Set, Tuple
 
 from evatorrent.peer.protocol import (
     Bitfield,
@@ -25,9 +25,11 @@ from evatorrent.tracker import Peer
 
 logger = logging.getLogger(__name__)
 
+PIPELINE_CAPACITY = 4  # Number of concurrent in-flight block requests per peer
+
 
 class PeerConnection:
-    """Manages an active peer connection in the swarm."""
+    """Manages an active peer connection in the swarm with request pipelining."""
 
     def __init__(
         self,
@@ -36,6 +38,7 @@ class PeerConnection:
         peer_id: bytes,
         piece_manager: PieceManager,
         on_disconnect: Optional[Callable[[str], None]] = None,
+        is_throttled: Optional[Callable[[], bool]] = None,
     ):
         self.peer = peer
         self.peer_key = f"{peer.ip}:{peer.port}"
@@ -43,6 +46,7 @@ class PeerConnection:
         self.peer_id = peer_id
         self.piece_manager = piece_manager
         self.on_disconnect = on_disconnect
+        self.is_throttled = is_throttled
 
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
@@ -60,8 +64,8 @@ class PeerConnection:
         self._bytes_since_last_check: int = 0
 
         self._task: Optional[asyncio.Task] = None
-        self._request_lock = asyncio.Lock()
-        self._pending_request: Optional[Request] = None
+        # In-flight block requests: set of (piece_index, begin_offset)
+        self._pending_requests: Set[Tuple[int, int]] = set()
 
     def start(self) -> asyncio.Task:
         self.running = True
@@ -77,6 +81,7 @@ class PeerConnection:
     async def _close(self) -> None:
         self.is_connected = False
         self.piece_manager.remove_peer(self.peer_key)
+        self._pending_requests.clear()
         if self.writer:
             try:
                 self.writer.close()
@@ -131,7 +136,7 @@ class PeerConnection:
             await self.send_message(Interested())
             self.am_interested = True
 
-            # 6. Stream incoming messages and process
+            # 6. Stream incoming messages and run request loop
             stream = PeerStreamIterator(self.reader)
             request_loop_task = asyncio.create_task(self._request_blocks_loop())
 
@@ -168,31 +173,38 @@ class PeerConnection:
         elif isinstance(msg, Piece):
             self.bytes_downloaded += len(msg.block)
             self._bytes_since_last_check += len(msg.block)
+            # Remove from in-flight requests set
+            self._pending_requests.discard((msg.index, msg.begin))
             self.piece_manager.on_block_received(msg.index, msg.begin, msg.block)
-            if self._pending_request and self._pending_request.index == msg.index and self._pending_request.begin == msg.begin:
-                self._pending_request = None
         elif isinstance(msg, KeepAlive):
             pass
 
     async def _request_blocks_loop(self) -> None:
-        """Pipelining loop requesting missing blocks while unchoked."""
+        """Pipelined loop requesting missing blocks in parallel while unchoked."""
         while self.running and not self.piece_manager.is_complete:
             if not self.is_connected or self.is_choked:
                 await asyncio.sleep(0.1)
                 continue
 
-            if self._pending_request is not None:
-                # Wait for pending block response or timeout
+            # Check rate limiting
+            if self.is_throttled and self.is_throttled():
                 await asyncio.sleep(0.05)
                 continue
 
-            block = self.piece_manager.next_request(self.peer_key)
-            if block:
-                req = Request(index=block.piece_index, begin=block.begin, length=block.length)
-                self._pending_request = req
-                await self.send_message(req)
+            available_slots = PIPELINE_CAPACITY - len(self._pending_requests)
+            if available_slots <= 0:
+                await asyncio.sleep(0.03)
+                continue
+
+            blocks = self.piece_manager.next_requests(self.peer_key, max_count=available_slots)
+            if blocks:
+                for block in blocks:
+                    req_key = (block.piece_index, block.begin)
+                    self._pending_requests.add(req_key)
+                    req = Request(index=block.piece_index, begin=block.begin, length=block.length)
+                    await self.send_message(req)
             else:
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.15)
 
     def update_speed(self) -> None:
         """Calculates current download speed over the elapsed time interval."""

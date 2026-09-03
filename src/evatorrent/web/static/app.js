@@ -111,6 +111,8 @@ function updateCounts() {
   document.getElementById('count-dl').textContent = torrents.filter(t => t.status === 'downloading').length;
   document.getElementById('count-done').textContent = torrents.filter(t => t.status === 'completed').length;
   document.getElementById('count-paused').textContent = torrents.filter(t => t.status === 'paused').length;
+  const errEl = document.getElementById('count-err');
+  if (errEl) errEl.textContent = torrents.filter(t => t.status === 'error').length;
 }
 
 function renderTorrentList() {
@@ -140,11 +142,14 @@ function renderTorrentList() {
           <div class="card-title" title="${t.name}">${t.name}</div>
         </div>
         <div class="card-actions" onclick="event.stopPropagation()">
+          <button class="card-btn" title="Set Speed Limit" onclick="promptSpeedLimit('${t.info_hash}')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          </button>
           ${t.status === 'downloading'
             ? `<button class="card-btn" title="Pause" onclick="pauseTorrent('${t.info_hash}')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
                </button>`
-            : `<button class="card-btn" title="Resume" onclick="resumeTorrent('${t.info_hash}')">
+            : `<button class="card-btn" title="Resume / Retry" onclick="resumeTorrent('${t.info_hash}')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                </button>`
           }
@@ -155,7 +160,7 @@ function renderTorrentList() {
       </div>
 
       <div class="progress-bar-container">
-        <div class="progress-fill" style="width: ${t.progress}%"></div>
+        <div class="progress-fill ${t.status === 'error' ? 'error' : ''}" style="width: ${t.progress}%"></div>
       </div>
 
       <div class="card-meta">
@@ -163,11 +168,17 @@ function renderTorrentList() {
           <div class="meta-item">Progress: <strong>${t.progress}%</strong></div>
           <div class="meta-item">Size: <strong>${formatBytes(t.downloaded)} / ${formatBytes(t.total_size)}</strong></div>
           <div class="meta-item">Peers: <strong>${t.peers_connected} / ${t.peers_total}</strong></div>
+          ${t.download_limit ? `<div class="meta-item purple-text">Limit: <strong>${formatSpeed(t.download_limit)}</strong></div>` : ''}
         </div>
         <div class="meta-group">
-          <div class="meta-item">DL: <strong class="cyan-text">${formatSpeed(t.download_speed)}</strong></div>
-          <div class="meta-item">UL: <strong class="purple-text">${formatSpeed(t.upload_speed)}</strong></div>
-          <div class="meta-item">ETA: <strong>${formatDuration(t.eta)}</strong></div>
+          ${t.status === 'error' && t.error_message
+            ? `<div class="meta-item" style="color: var(--accent-danger); font-weight: 600;">⚠️ ${t.error_message}</div>`
+            : `
+              <div class="meta-item">DL: <strong class="cyan-text">${formatSpeed(t.download_speed)}</strong></div>
+              <div class="meta-item">UL: <strong class="purple-text">${formatSpeed(t.upload_speed)}</strong></div>
+              <div class="meta-item">ETA: <strong>${formatDuration(t.eta)}</strong></div>
+            `
+          }
         </div>
       </div>
     </div>
@@ -194,6 +205,30 @@ async function resumeTorrent(hash) {
     }
   } catch (e) {
     showToast('Failed to resume torrent', 'error');
+  }
+}
+
+async function promptSpeedLimit(hash) {
+  if (!hash) return;
+  const current = torrents.find(t => t.info_hash === hash);
+  const currentKb = current && current.download_limit ? Math.round(current.download_limit / 1024) : 0;
+  const input = prompt(`Enter max download speed limit in KB/s (0 for unlimited):`, currentKb > 0 ? currentKb : '');
+  if (input === null) return;
+
+  const kb = parseInt(input.trim(), 10);
+  const bytesLimit = (isNaN(kb) || kb <= 0) ? null : kb * 1024;
+
+  try {
+    const res = await fetch(`/api/torrents/${hash}/speed_limit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ download_limit: bytesLimit }),
+    });
+    if (res.ok) {
+      showToast(bytesLimit ? `Speed limit set to ${kb} KB/s` : 'Speed limit removed (Unlimited)', 'success');
+    }
+  } catch (e) {
+    showToast('Failed to update speed limit', 'error');
   }
 }
 
@@ -245,6 +280,22 @@ function refreshInspectorData(t) {
   document.getElementById('insp-peers').textContent = `${t.peers_connected} connected (${t.peers_total} discovered in swarm)`;
   document.getElementById('insp-pieces').textContent = `${t.pieces_completed} / ${t.piece_count}`;
   document.getElementById('insp-piece-len').textContent = formatBytes(t.piece_length);
+
+  const limitEl = document.getElementById('insp-speed-limit');
+  if (limitEl) {
+    limitEl.textContent = t.download_limit ? formatSpeed(t.download_limit) : 'Unlimited';
+  }
+
+  const errBox = document.getElementById('insp-error-box');
+  const errMsg = document.getElementById('insp-error-msg');
+  if (errBox && errMsg) {
+    if (t.status === 'error' && t.error_message) {
+      errMsg.textContent = t.error_message;
+      errBox.classList.remove('hidden');
+    } else {
+      errBox.classList.add('hidden');
+    }
+  }
 
   // Trackers list
   const trackersEl = document.getElementById('insp-trackers');

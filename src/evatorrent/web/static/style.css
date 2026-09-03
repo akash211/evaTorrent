@@ -858,6 +858,35 @@ body {
   to { transform: translateX(0); opacity: 1; }
 }
 
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  border-radius: var(--radius-sm);
+}
+
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: var(--accent-danger);
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  font-size: 0.82rem;
+  font-weight: 500;
+  margin-bottom: 16px;
+}
+
+.error-banner.hidden {
+  display: none;
+}
+
+.progress-fill.error {
+  background: var(--accent-danger);
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.5);
+}
+
 @media (max-width: 768px) {
   .navbar { padding: 12px 16px; }
   .main-layout { padding: 16px; }

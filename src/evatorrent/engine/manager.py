@@ -57,6 +57,13 @@ class EngineManager:
             return True
         return False
 
+    def set_speed_limit(self, info_hash_hex: str, limit_bytes_per_sec: Optional[int]) -> bool:
+        session = self.get_session(info_hash_hex)
+        if session:
+            session.set_download_limit(limit_bytes_per_sec)
+            return True
+        return False
+
     async def remove_torrent(self, info_hash_hex: str, delete_files: bool = False) -> bool:
         key = info_hash_hex.lower()
         session = self.sessions.pop(key, None)

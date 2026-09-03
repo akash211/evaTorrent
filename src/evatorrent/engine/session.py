@@ -18,6 +18,9 @@ from evatorrent.tracker.manager import TrackerManager
 
 logger = logging.getLogger(__name__)
 
+# Stall timeout: if download is active but no data received for 3 minutes, transition to ERROR
+STALL_TIMEOUT_SECONDS = 180.0
+
 
 class TorrentStatus(str, Enum):
     PENDING = "pending"
@@ -30,7 +33,7 @@ class TorrentStatus(str, Enum):
 
 
 class TorrentSession:
-    """Manages the download and seeding lifecycle of a single torrent."""
+    """Manages the download lifecycle of a single torrent."""
 
     def __init__(
         self,
@@ -38,11 +41,13 @@ class TorrentSession:
         download_dir: Path,
         max_peers: int = 35,
         port: int = 6881,
+        download_limit: Optional[int] = None,  # Bytes/sec, None or 0 for unlimited
     ):
         self.torrent = torrent
         self.download_dir = Path(download_dir)
         self.max_peers = max_peers
         self.port = port
+        self.download_limit = download_limit
 
         self.piece_manager = PieceManager(
             torrent=torrent,
@@ -68,12 +73,25 @@ class TorrentSession:
         self.eta_seconds: Optional[int] = None
         self._last_speed_check: float = time.time()
         self._last_downloaded_bytes: int = 0
+        self._last_data_received_time: float = time.time()
+
+    def is_throttled(self) -> bool:
+        """Returns True if the current download speed exceeds the configured per-torrent limit."""
+        if not self.download_limit or self.download_limit <= 0:
+            return False
+        return self.download_speed >= self.download_limit
+
+    def set_download_limit(self, limit_bytes_per_sec: Optional[int]) -> None:
+        """Sets or clears the download rate limit for this torrent."""
+        self.download_limit = limit_bytes_per_sec if (limit_bytes_per_sec and limit_bytes_per_sec > 0) else None
 
     def start(self) -> None:
         if self._running:
             return
         self._running = True
         self.status = TorrentStatus.DOWNLOADING
+        self.error_message = None
+        self._last_data_received_time = time.time()
         self._main_task = asyncio.create_task(self._main_loop())
         self._speed_task = asyncio.create_task(self._speed_meter_loop())
 
@@ -91,13 +109,17 @@ class TorrentSession:
             self._speed_task.cancel()
 
     def resume(self) -> None:
-        if self.status != TorrentStatus.PAUSED:
+        if self.status == TorrentStatus.COMPLETED:
             return
         self.start()
 
     async def stop(self) -> None:
         self._running = False
-        self.status = TorrentStatus.COMPLETED if self.piece_manager.is_complete else TorrentStatus.PAUSED
+        if self.piece_manager.is_complete:
+            self.status = TorrentStatus.COMPLETED
+        elif self.status != TorrentStatus.ERROR:
+            self.status = TorrentStatus.PAUSED
+
         for peer_conn in list(self.active_peers.values()):
             await peer_conn.stop()
         self.active_peers.clear()
@@ -106,16 +128,44 @@ class TorrentSession:
         if self._speed_task and not self._speed_task.done():
             self._speed_task.cancel()
 
+    async def _stop_seeding_and_complete(self) -> None:
+        """Stops peer connections immediately once download is complete - no seeding."""
+        self.status = TorrentStatus.COMPLETED
+        self._running = False
+        logger.info(f"Torrent '{self.torrent.name}' fully downloaded. Stopping peer connections (no seeding).")
+
+        # Notify tracker of completion
+        try:
+            await self.tracker_manager.announce(
+                info_hash=self.torrent.info_hash,
+                uploaded=self.piece_manager.bytes_uploaded,
+                downloaded=self.piece_manager.bytes_downloaded,
+                left=0,
+                event="completed",
+            )
+        except Exception:
+            pass
+
+        # Disconnect all peers to prevent seeding
+        for peer_conn in list(self.active_peers.values()):
+            await peer_conn.stop()
+        self.active_peers.clear()
+
+        if self._main_task and not self._main_task.done():
+            self._main_task.cancel()
+        if self._speed_task and not self._speed_task.done():
+            self._speed_task.cancel()
+
     def _on_piece_completed(self, piece_index: int) -> None:
-        """Broadcasts Have message to all connected peers upon piece verification."""
+        """Broadcasts Have message to peers upon piece verification, or triggers completion."""
+        self._last_data_received_time = time.time()
         have_msg = Have(piece_index=piece_index)
         for peer_conn in self.active_peers.values():
             if peer_conn.is_connected:
                 asyncio.create_task(peer_conn.send_message(have_msg))
 
         if self.piece_manager.is_complete:
-            self.status = TorrentStatus.COMPLETED
-            logger.info(f"Torrent '{self.torrent.name}' download completed successfully!")
+            asyncio.create_task(self._stop_seeding_and_complete())
 
     def _on_peer_disconnected(self, peer_key: str) -> None:
         self.active_peers.pop(peer_key, None)
@@ -123,16 +173,28 @@ class TorrentSession:
     async def _main_loop(self) -> None:
         """Main swarm maintenance loop: announces to trackers and maintains peer connections."""
         last_announce: float = 0.0
-        announce_interval: float = 30.0  # Initial quick interval
+        announce_interval: float = 30.0
 
         while self._running:
             try:
                 now = time.time()
+
+                # Check if download stalled for over STALL_TIMEOUT_SECONDS
+                if not self.piece_manager.is_complete and self.status == TorrentStatus.DOWNLOADING:
+                    if now - self._last_data_received_time > STALL_TIMEOUT_SECONDS:
+                        logger.warning(
+                            f"Torrent '{self.torrent.name}' stalled for >{int(STALL_TIMEOUT_SECONDS)}s. Marking errored."
+                        )
+                        self.status = TorrentStatus.ERROR
+                        self.error_message = f"Download stalled: no data received for {int(STALL_TIMEOUT_SECONDS / 60)} minutes"
+                        await self.stop()
+                        break
+
                 # 1. Announce to tracker if interval expired
                 if now - last_announce >= announce_interval:
                     left = max(0, self.torrent.total_length - self.piece_manager.bytes_downloaded)
-                    event = "completed" if self.piece_manager.is_complete else ("started" if last_announce == 0 else "")
-                    
+                    event = "started" if last_announce == 0 else ""
+
                     try:
                         response: TrackerResponse = await self.tracker_manager.announce(
                             info_hash=self.torrent.info_hash,
@@ -164,15 +226,10 @@ class TorrentSession:
                             peer_id=self.tracker_manager.peer_id,
                             piece_manager=self.piece_manager,
                             on_disconnect=self._on_peer_disconnected,
+                            is_throttled=self.is_throttled,
                         )
                         self.active_peers[peer_key] = conn
                         conn.start()
-
-                # 3. Check completion status
-                if self.piece_manager.is_complete:
-                    self.status = TorrentStatus.COMPLETED
-                    self.download_speed = 0.0
-                    self.eta_seconds = 0
 
                 await asyncio.sleep(2.0)
             except asyncio.CancelledError:
@@ -193,8 +250,10 @@ class TorrentSession:
 
                 curr_downloaded = self.piece_manager.bytes_downloaded
                 delta = curr_downloaded - self._last_downloaded_bytes
-                self.download_speed = max(0.0, delta / elapsed)
+                if delta > 0:
+                    self._last_data_received_time = now
 
+                self.download_speed = max(0.0, delta / elapsed)
                 self._last_downloaded_bytes = curr_downloaded
                 self._last_speed_check = now
 
@@ -221,12 +280,14 @@ class TorrentSession:
             "info_hash": self.torrent.info_hash_hex,
             "name": self.torrent.name,
             "status": self.status.value,
+            "error_message": self.error_message,
             "total_size": self.torrent.total_length,
             "downloaded": self.piece_manager.bytes_downloaded,
             "uploaded": self.piece_manager.bytes_uploaded,
             "progress": round(self.piece_manager.progress_percentage, 2),
             "download_speed": round(self.download_speed, 2),
             "upload_speed": round(self.upload_speed, 2),
+            "download_limit": self.download_limit,
             "eta": self.eta_seconds,
             "peers_connected": connected_count,
             "peers_total": len(self.seen_peers),

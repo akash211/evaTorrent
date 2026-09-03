@@ -14,11 +14,11 @@ from evatorrent.torrent import Torrent
 
 logger = logging.getLogger(__name__)
 
-BLOCK_TIMEOUT = 15.0  # seconds before in-flight block request can be reassigned
+BLOCK_TIMEOUT = 12.0  # seconds before in-flight block request can be reassigned
 
 
 class PieceManager:
-    """Coordinates block requests, piece validation, and disk saving."""
+    """Coordinates parallel block requests, piece validation, and disk saving."""
 
     def __init__(
         self,
@@ -44,7 +44,7 @@ class PieceManager:
         self.ongoing_pieces: Set[int] = set()
         self.completed_pieces: Set[int] = set()
 
-        # Peer availability mapping: peer_key (str) -> Bitfield or Set of piece indices
+        # Peer availability mapping: peer_key (str) -> Set of piece indices
         self.peers: Dict[str, Set[int]] = {}
 
         self.bytes_downloaded: int = 0
@@ -87,13 +87,29 @@ class PieceManager:
             buf[byte_idx] |= (1 << bit_idx)
         return Bitfield(bytes(buf))
 
-    def next_request(self, peer_key: str) -> Optional[Block]:
-        """Selects the next block to request from a peer."""
+    def _get_rarest_missing_pieces(self, peer_pieces: Set[int]) -> List[int]:
+        """Calculates rarity of missing pieces held by this peer and returns sorted rarest-first."""
+        candidate_pieces = [p for p in self.missing_pieces if p in peer_pieces and p not in self.ongoing_pieces]
+        if not candidate_pieces:
+            return []
+
+        # Count peer frequency for candidates
+        piece_rarity: Dict[int, int] = {}
+        for p in candidate_pieces:
+            count = sum(1 for peer_set in self.peers.values() if p in peer_set)
+            piece_rarity[p] = count
+
+        # Sort by lowest rarity first, then piece index
+        return sorted(candidate_pieces, key=lambda idx: (piece_rarity[idx], idx))
+
+    def next_requests(self, peer_key: str, max_count: int = 4) -> List[Block]:
+        """Pipelined block selector: returns up to max_count blocks to request from this peer."""
         peer_pieces = self.peers.get(peer_key)
         if not peer_pieces:
-            return None
+            return []
 
         now = time.time()
+        blocks_to_request: List[Block] = []
 
         # 1. First priority: timed-out blocks in ongoing pieces this peer has
         for piece_idx in list(self.ongoing_pieces):
@@ -101,31 +117,43 @@ class PieceManager:
                 piece = self.pieces[piece_idx]
                 for block in piece.blocks:
                     if not block.is_complete:
-                        if block.requested_time == 0.0 or (now - block.requested_time > BLOCK_TIMEOUT):
+                        if block.requested_time > 0.0 and (now - block.requested_time > BLOCK_TIMEOUT):
                             block.mark_requested()
-                            return block
+                            blocks_to_request.append(block)
+                            if len(blocks_to_request) >= max_count:
+                                return blocks_to_request
 
-        # 2. Second priority: next unrequested block in ongoing pieces
+        # 2. Second priority: unrequested blocks in ongoing pieces
         for piece_idx in list(self.ongoing_pieces):
             if piece_idx in peer_pieces:
                 piece = self.pieces[piece_idx]
                 for block in piece.blocks:
                     if not block.is_complete and block.requested_time == 0.0:
                         block.mark_requested()
-                        return block
+                        blocks_to_request.append(block)
+                        if len(blocks_to_request) >= max_count:
+                            return blocks_to_request
 
-        # 3. Third priority: start a new missing piece that the peer has
-        # (Sequential selection among available missing pieces)
-        for piece_idx in sorted(self.missing_pieces):
-            if piece_idx in peer_pieces and piece_idx not in self.ongoing_pieces:
+        # 3. Third priority: start new missing pieces using Rarest-First strategy
+        rarest_candidates = self._get_rarest_missing_pieces(peer_pieces)
+        for piece_idx in rarest_candidates:
+            if piece_idx in self.missing_pieces:
                 self.missing_pieces.remove(piece_idx)
                 self.ongoing_pieces.add(piece_idx)
                 piece = self.pieces[piece_idx]
-                block = piece.blocks[0]
-                block.mark_requested()
-                return block
+                for block in piece.blocks:
+                    if not block.is_complete and block.requested_time == 0.0:
+                        block.mark_requested()
+                        blocks_to_request.append(block)
+                        if len(blocks_to_request) >= max_count:
+                            return blocks_to_request
 
-        return None
+        return blocks_to_request
+
+    def next_request(self, peer_key: str) -> Optional[Block]:
+        """Single block request helper."""
+        reqs = self.next_requests(peer_key, max_count=1)
+        return reqs[0] if reqs else None
 
     def on_block_received(self, index: int, begin: int, data: bytes) -> bool:
         """Processes received block data and triggers piece verification if complete."""
@@ -155,6 +183,11 @@ class PieceManager:
                     f"Piece {index}/{self.torrent.piece_count} verified & saved. "
                     f"Progress: {self.progress_percentage:.1f}%"
                 )
+
+                # If all pieces are complete, finalize files (remove .part extensions)
+                if self.is_complete:
+                    self.disk_writer.finalize()
+
                 if self.on_piece_complete:
                     self.on_piece_complete(index)
                 return True
