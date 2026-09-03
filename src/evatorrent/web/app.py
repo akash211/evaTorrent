@@ -66,7 +66,7 @@ class MagnetRequest(BaseModel):
     magnet: str
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def serve_index():
     index_file = STATIC_DIR / "index.html"
     if index_file.exists():
