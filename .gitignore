@@ -49,3 +49,7 @@ htmlcov/
 downloads/
 *.torrent
 torrents/
+
+# AI documentation (local only)
+AGENTS.md
+
