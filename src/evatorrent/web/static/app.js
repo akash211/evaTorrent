@@ -8,6 +8,246 @@ let activeInspectorTab = 'overview';
 let ws = null;
 let reconnectTimer = null;
 
+let authState = {
+  setup_required: false,
+  is_authenticated: false,
+  user_email: null,
+  google_enabled: false,
+  google_client_id: null,
+};
+
+// --- Authentication & Setup ---
+
+async function checkAuth() {
+  try {
+    const res = await fetch('/api/auth/status');
+    if (!res.ok) return false;
+    const data = await res.json();
+    authState = data;
+
+    const modal = document.getElementById('modal-auth');
+    const viewSetup = document.getElementById('view-setup');
+    const viewLogin = document.getElementById('view-login');
+    const userGroup = document.getElementById('nav-user-group');
+    const userDisplay = document.getElementById('user-display');
+
+    if (data.setup_required) {
+      modal.classList.remove('hidden');
+      viewSetup.classList.remove('hidden');
+      viewLogin.classList.add('hidden');
+      userGroup.classList.add('hidden');
+      document.getElementById('auth-title').textContent = 'Setup Administrator';
+      document.getElementById('auth-subtitle').textContent = 'Register your primary email to secure evaTorrent';
+      return false;
+    } else if (!data.is_authenticated) {
+      modal.classList.remove('hidden');
+      viewSetup.classList.add('hidden');
+      viewLogin.classList.remove('hidden');
+      userGroup.classList.add('hidden');
+      document.getElementById('auth-title').textContent = 'Sign In to evaTorrent';
+      document.getElementById('auth-subtitle').textContent = 'Authorized Administrator Access';
+
+      if (data.admin_email_masked) {
+        document.getElementById('login-email').placeholder = `Authorized: ${data.admin_email_masked}`;
+      }
+
+      setupGoogleAuth(data.google_client_id);
+      return false;
+    } else {
+      modal.classList.add('hidden');
+      viewSetup.classList.add('hidden');
+      viewLogin.classList.add('hidden');
+      userGroup.classList.remove('hidden');
+      userDisplay.textContent = data.user_email;
+      connectWebSocket();
+      return true;
+    }
+  } catch (err) {
+    console.error('Error checking auth:', err);
+    return false;
+  }
+}
+
+function switchAuthTab(tab) {
+  document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.auth-tab-content').forEach(c => c.classList.remove('active'));
+
+  if (tab === 'otp') {
+    document.getElementById('tab-btn-otp').classList.add('active');
+    document.getElementById('auth-tab-otp').classList.add('active');
+  } else if (tab === 'google') {
+    document.getElementById('tab-btn-google').classList.add('active');
+    document.getElementById('auth-tab-google').classList.add('active');
+  }
+}
+
+async function submitSetup() {
+  const email = document.getElementById('setup-email').value.trim();
+  const googleId = document.getElementById('setup-google-id').value.trim();
+
+  if (!email) {
+    showToast('Please provide an administrator email.', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btn-setup-submit');
+  btn.disabled = true;
+  btn.textContent = 'Saving setup...';
+
+  try {
+    const res = await fetch('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ admin_email: email, google_client_id: googleId || null }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Setup complete! Welcome to evaTorrent.', 'success');
+      await checkAuth();
+    } else {
+      showToast(data.detail || 'Setup failed.', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to complete setup.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Complete Setup & Sign In';
+  }
+}
+
+async function requestLoginOTP() {
+  const email = document.getElementById('login-email').value.trim();
+  if (!email) {
+    showToast('Please enter your authorized email.', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btn-request-otp');
+  btn.disabled = true;
+  btn.textContent = 'Sending code...';
+
+  try {
+    const res = await fetch('/api/auth/otp/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast(data.message || 'OTP sent! Check your inbox.', 'success');
+      document.getElementById('otp-code-group').classList.remove('hidden');
+      document.getElementById('btn-request-otp').classList.add('hidden');
+      document.getElementById('btn-verify-otp').classList.remove('hidden');
+      document.getElementById('login-otp').focus();
+    } else {
+      showToast(data.detail || 'Failed to send OTP code.', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to request OTP code.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Send Login Code';
+  }
+}
+
+async function handleOTPSubmit() {
+  const email = document.getElementById('login-email').value.trim();
+  const otp = document.getElementById('login-otp').value.trim();
+
+  if (!email || !otp) {
+    showToast('Please enter both email and 6-digit code.', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btn-verify-otp');
+  btn.disabled = true;
+  btn.textContent = 'Verifying...';
+
+  try {
+    const res = await fetch('/api/auth/otp/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, otp }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Logged in successfully!', 'success');
+      await checkAuth();
+    } else {
+      showToast(data.detail || 'Invalid verification code.', 'error');
+    }
+  } catch (err) {
+    showToast('Verification failed.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Verify & Sign In';
+  }
+}
+
+function setupGoogleAuth(clientId) {
+  const container = document.getElementById('google-btn-container');
+  const disabledMsg = document.getElementById('google-disabled-msg');
+
+  if (!clientId) {
+    container.style.display = 'none';
+    disabledMsg.classList.remove('hidden');
+    return;
+  }
+
+  container.style.display = 'flex';
+  disabledMsg.classList.add('hidden');
+
+  if (window.google && window.google.accounts && window.google.accounts.id) {
+    try {
+      google.accounts.id.initialize({
+        client_id: clientId,
+        callback: handleGoogleCredentialResponse,
+      });
+      google.accounts.id.renderButton(container, {
+        theme: 'filled_black',
+        size: 'large',
+        text: 'signin_with',
+        shape: 'rectangular',
+        width: 280,
+      });
+    } catch (e) {
+      console.warn('Google Identity initialization error:', e);
+    }
+  }
+}
+
+async function handleGoogleCredentialResponse(response) {
+  if (!response || !response.credential) return;
+
+  try {
+    const res = await fetch('/api/auth/google', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential: response.credential }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Google Sign-In successful!', 'success');
+      await checkAuth();
+    } else {
+      showToast(data.detail || 'Google authentication failed.', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to authenticate with Google.', 'error');
+  }
+}
+
+async function logout() {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    if (ws) ws.close();
+    showToast('Signed out.', 'info');
+    await checkAuth();
+  } catch (err) {
+    console.error('Logout error:', err);
+  }
+}
+
 // Format utilities
 function formatBytes(bytes, decimals = 2) {
   if (!bytes || bytes === 0) return '0 B';
@@ -449,7 +689,7 @@ async function submitMagnet() {
 
 // Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
-  connectWebSocket();
+  checkAuth();
 
   // Add Torrent Button
   document.getElementById('btn-add-torrent').addEventListener('click', openAddModal);

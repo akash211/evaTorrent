@@ -4,10 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>evaTorrent ⚡ | Next-Gen BitTorrent Engine</title>
+  <!-- Fonts & Google Identity Services -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <div class="app-container">
@@ -21,7 +23,7 @@
         </div>
         <div class="brand-text">
           <h1>evaTorrent</h1>
-          <span class="version-tag">v0.2.0 • Asyncio Core</span>
+          <span class="version-tag">v0.3.0 • Asyncio Core</span>
         </div>
       </div>
 
@@ -43,6 +45,10 @@
       </div>
 
       <div class="nav-actions">
+        <div id="nav-user-group" class="nav-user-group hidden">
+          <span id="user-display" class="user-badge"></span>
+          <button class="btn btn-secondary btn-sm" onclick="logout()">Logout</button>
+        </div>
         <button id="btn-add-torrent" class="btn btn-primary">
           <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
             <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -227,6 +233,89 @@
           <div class="input-group">
             <input type="text" id="magnet-input" placeholder="magnet:?xt=urn:btih:..." />
             <button class="btn btn-secondary" onclick="submitMagnet()">Add Magnet</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Authentication & First-Time Setup -->
+    <div id="modal-auth" class="modal-backdrop hidden">
+      <div class="auth-card" id="auth-card">
+        <!-- Brand Header -->
+        <div class="auth-header">
+          <div class="brand-logo" style="margin: 0 auto 12px;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+            </svg>
+          </div>
+          <h2 id="auth-title">Welcome to evaTorrent</h2>
+          <p id="auth-subtitle">High-performance modern BitTorrent engine</p>
+        </div>
+
+        <!-- View 1: First-time Administrator Setup -->
+        <div id="view-setup" class="auth-view hidden">
+          <div class="alert-box info-alert">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+            <span>Initial Launch: Set up your administrator email to secure your instance.</span>
+          </div>
+          <form onsubmit="event.preventDefault(); submitSetup();">
+            <div class="form-group">
+              <label>Administrator Email *</label>
+              <input type="email" id="setup-email" placeholder="e.g. you@example.com" required />
+            </div>
+            <div class="form-group">
+              <label>Google Client ID <small style="color:var(--text-muted); font-weight:normal;">(Optional, for Google Login)</small></label>
+              <input type="text" id="setup-google-id" placeholder="Optional Google OAuth Client ID" />
+            </div>
+            <button type="submit" id="btn-setup-submit" class="btn btn-primary btn-block">Complete Setup & Sign In</button>
+          </form>
+        </div>
+
+        <!-- View 2: Login -->
+        <div id="view-login" class="auth-view hidden">
+          <!-- Auth Tabs -->
+          <div class="auth-tabs" id="auth-tabs">
+            <button class="auth-tab active" id="tab-btn-otp" onclick="switchAuthTab('otp')">Email OTP</button>
+            <button class="auth-tab" id="tab-btn-google" onclick="switchAuthTab('google')">Google Sign-In</button>
+          </div>
+
+          <!-- Email OTP Tab -->
+          <div id="auth-tab-otp" class="auth-tab-content active">
+            <form onsubmit="event.preventDefault(); handleOTPSubmit();">
+              <div class="form-group">
+                <label>Authorized Email Address</label>
+                <input type="email" id="login-email" placeholder="e.g. you@example.com" required />
+              </div>
+
+              <!-- Step 2: Code Input (hidden initially) -->
+              <div id="otp-code-group" class="form-group hidden">
+                <label>Verification Code (6-digit OTP)</label>
+                <input type="text" id="login-otp" maxlength="6" pattern="[0-9]{6}" placeholder="000000" style="letter-spacing: 6px; font-size: 1.25rem; text-align: center;" />
+                <div class="otp-help-text" id="otp-help-text">
+                  <span>Code sent! Check your inbox (or container console logs).</span>
+                </div>
+              </div>
+
+              <div id="otp-action-group">
+                <button type="button" id="btn-request-otp" class="btn btn-primary btn-block" onclick="requestLoginOTP()">
+                  Send Login Code
+                </button>
+                <button type="submit" id="btn-verify-otp" class="btn btn-primary btn-block hidden">
+                  Verify & Sign In
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Google Login Tab -->
+          <div id="auth-tab-google" class="auth-tab-content">
+            <p style="font-size: 0.85rem; color: var(--text-secondary); text-align: center; margin-bottom: 16px;">
+              Sign in with your authorized Google account to directly access the dashboard.
+            </p>
+            <div id="google-btn-container" style="display: flex; justify-content: center; min-height: 44px;"></div>
+            <div id="google-disabled-msg" class="alert-box warning-alert hidden">
+              Google Client ID is not configured. Use Email OTP to log in.
+            </div>
           </div>
         </div>
       </div>

@@ -1,4 +1,4 @@
-"""FastAPI web application exposing REST API, WebSockets, and static Web UI."""
+"""FastAPI web application exposing REST API, WebSockets, static Web UI, and Auth."""
 
 from __future__ import annotations
 
@@ -7,26 +7,48 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from evatorrent.auth import (
+    AuthConfig,
+    EmailSender,
+    GoogleVerifier,
+    OTPManager,
+    SessionManager,
+)
 from evatorrent.engine.manager import EngineManager
 from evatorrent.torrent import Magnet, Torrent
 from evatorrent.web.ws import WebSocketManager
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Global engine manager instance
+# Global managers
 engine_manager = EngineManager()
 ws_manager = WebSocketManager()
+auth_config = AuthConfig()
+session_manager = SessionManager(auth_config)
+otp_manager = OTPManager()
+email_sender = EmailSender(auth_config)
+google_verifier = GoogleVerifier(auth_config)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start background telemetry broadcast task
     broadcast_task = asyncio.create_task(telemetry_loop())
     yield
     broadcast_task.cancel()
@@ -34,7 +56,7 @@ async def lifespan(app: FastAPI):
 
 
 async def telemetry_loop():
-    """Streams live telemetry to all connected WebSocket clients every 800ms."""
+    """Streams live telemetry to all connected authenticated WebSocket clients every 800ms."""
     while True:
         try:
             await asyncio.sleep(0.8)
@@ -51,7 +73,7 @@ async def telemetry_loop():
             pass
 
 
-app = FastAPI(title="evaTorrent API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="evaTorrent API", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -62,8 +84,195 @@ app.add_middleware(
 )
 
 
+def get_current_user(
+    request: Request,
+    evatorrent_session: Optional[str] = Cookie(None),
+) -> str:
+    """Dependency validating authenticated user session via cookie or Authorization header."""
+    if not auth_config.is_setup_done:
+        raise HTTPException(status_code=401, detail="SETUP_REQUIRED")
+
+    token = evatorrent_session
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
+
+    if not token:
+        raise HTTPException(status_code=401, detail="UNAUTHORIZED")
+
+    email = session_manager.verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="INVALID_OR_EXPIRED_SESSION")
+    return email
+
+
+# --- Auth Models ---
+
+class SetupRequest(BaseModel):
+    admin_email: str
+    google_client_id: Optional[str] = None
+
+
+class OTPRequest(BaseModel):
+    email: str
+
+
+class OTPVerifyRequest(BaseModel):
+    email: str
+    otp: str
+
+
+class GoogleAuthRequest(BaseModel):
+    credential: str
+
+
+# --- Auth Endpoints ---
+
+@app.get("/api/auth/status")
+async def auth_status(
+    request: Request,
+    evatorrent_session: Optional[str] = Cookie(None),
+):
+    """Returns current auth state, setup status, and whether Google OAuth is enabled."""
+    token = evatorrent_session
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
+
+    verified_email = session_manager.verify_token(token) if token else None
+
+    # Mask admin email for display if unauthenticated
+    display_admin = None
+    if auth_config.admin_email:
+        parts = auth_config.admin_email.split("@")
+        if len(parts) == 2:
+            display_admin = f"{parts[0][:3]}***@{parts[1]}"
+        else:
+            display_admin = "***"
+
+    return {
+        "setup_required": not auth_config.is_setup_done,
+        "admin_email_masked": display_admin,
+        "google_enabled": bool(auth_config.google_client_id),
+        "google_client_id": auth_config.google_client_id,
+        "is_authenticated": verified_email is not None,
+        "user_email": verified_email,
+        "smtp_configured": auth_config.is_smtp_configured,
+    }
+
+
+@app.post("/api/auth/setup")
+async def initial_setup(req: SetupRequest, response: Response):
+    """Initial first-time setup to register the administrator email."""
+    if auth_config.is_setup_done:
+        raise HTTPException(status_code=400, detail="Setup has already been completed.")
+
+    email = req.admin_email.strip().lower()
+    if not email or "@" not in email or "." not in email:
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+
+    auth_config.set_admin_email(email)
+    if req.google_client_id:
+        auth_config.set_google_client_id(req.google_client_id)
+
+    token = session_manager.create_token(email)
+    response.set_cookie(
+        key="evatorrent_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=86400 * 30,
+    )
+    return {"success": True, "token": token, "email": email}
+
+
+@app.post("/api/auth/otp/request")
+async def request_otp(req: OTPRequest):
+    """Generates and dispatches a 6-digit login OTP to the authorized email."""
+    if not auth_config.is_setup_done:
+        raise HTTPException(status_code=400, detail="Initial setup required first.")
+
+    email = req.email.strip().lower()
+    if email != auth_config.admin_email:
+        raise HTTPException(status_code=403, detail="Email is not authorized for this evaTorrent instance.")
+
+    success, msg, otp = otp_manager.generate_otp(email)
+    if not success or not otp:
+        raise HTTPException(status_code=429, detail=msg)
+
+    await email_sender.send_otp(email, otp)
+    return {
+        "success": True,
+        "message": "Verification code dispatched! Check your email (or server logs).",
+        "smtp_configured": auth_config.is_smtp_configured,
+    }
+
+
+@app.post("/api/auth/otp/verify")
+async def verify_otp(req: OTPVerifyRequest, response: Response):
+    """Validates the 6-digit OTP and establishes an authenticated session."""
+    if not auth_config.is_setup_done:
+        raise HTTPException(status_code=400, detail="Initial setup required first.")
+
+    email = req.email.strip().lower()
+    if email != auth_config.admin_email:
+        raise HTTPException(status_code=403, detail="Email is not authorized.")
+
+    if not otp_manager.verify_otp(email, req.otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code.")
+
+    token = session_manager.create_token(email)
+    response.set_cookie(
+        key="evatorrent_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=86400 * 30,
+    )
+    return {"success": True, "token": token, "email": email}
+
+
+@app.post("/api/auth/google")
+async def google_login(req: GoogleAuthRequest, response: Response):
+    """Verifies Google ID Token and logs in directly if matching the authorized admin email."""
+    if not auth_config.is_setup_done:
+        raise HTTPException(status_code=400, detail="Initial setup required first.")
+
+    verified_email = await google_verifier.verify_id_token(req.credential)
+    if not verified_email:
+        raise HTTPException(
+            status_code=403,
+            detail="Google sign-in failed: Account email is not authorized for this instance.",
+        )
+
+    token = session_manager.create_token(verified_email)
+    response.set_cookie(
+        key="evatorrent_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=86400 * 30,
+    )
+    return {"success": True, "token": token, "email": verified_email}
+
+
+@app.post("/api/auth/logout")
+async def logout(response: Response):
+    """Terminates session."""
+    response.delete_cookie(key="evatorrent_session")
+    return {"success": True}
+
+
+# --- Core Web & Torrent Endpoints ---
+
 class MagnetRequest(BaseModel):
     magnet: str
+
+
+class SpeedLimitRequest(BaseModel):
+    download_limit: Optional[int] = None  # in bytes/sec (0 or null for unlimited)
 
 
 @app.api_route("/", methods=["GET", "HEAD"])
@@ -75,17 +284,20 @@ async def serve_index():
 
 
 @app.get("/api/stats")
-async def get_stats():
+async def get_stats(_: str = Depends(get_current_user)):
     return engine_manager.get_global_stats()
 
 
 @app.get("/api/torrents")
-async def list_torrents():
+async def list_torrents(_: str = Depends(get_current_user)):
     return engine_manager.get_all_torrents()
 
 
 @app.post("/api/torrents/upload")
-async def upload_torrent(file: UploadFile = File(...)):
+async def upload_torrent(
+    file: UploadFile = File(...),
+    _: str = Depends(get_current_user),
+):
     try:
         content = await file.read()
         session = engine_manager.add_torrent_bytes(content)
@@ -95,12 +307,12 @@ async def upload_torrent(file: UploadFile = File(...)):
 
 
 @app.post("/api/torrents/magnet")
-async def add_magnet(req: MagnetRequest):
+async def add_magnet(
+    req: MagnetRequest,
+    _: str = Depends(get_current_user),
+):
     try:
         magnet = Magnet(req.magnet)
-        # Note: Magnet support initiates a session with known trackers
-        # In a full DHT client, metadata is fetched via BEP 9 extension.
-        # Here we initialize what we have from the magnet URI.
         return {
             "success": True,
             "info_hash": magnet.info_hash_hex,
@@ -112,7 +324,10 @@ async def add_magnet(req: MagnetRequest):
 
 
 @app.post("/api/torrents/{info_hash}/pause")
-async def pause_torrent(info_hash: str):
+async def pause_torrent(
+    info_hash: str,
+    _: str = Depends(get_current_user),
+):
     success = await engine_manager.pause_torrent(info_hash)
     if not success:
         raise HTTPException(status_code=404, detail="Torrent not found")
@@ -120,19 +335,22 @@ async def pause_torrent(info_hash: str):
 
 
 @app.post("/api/torrents/{info_hash}/resume")
-async def resume_torrent(info_hash: str):
+async def resume_torrent(
+    info_hash: str,
+    _: str = Depends(get_current_user),
+):
     success = engine_manager.resume_torrent(info_hash)
     if not success:
         raise HTTPException(status_code=404, detail="Torrent not found")
     return {"success": True}
 
 
-class SpeedLimitRequest(BaseModel):
-    download_limit: Optional[int] = None  # in bytes/sec (0 or null for unlimited)
-
-
 @app.post("/api/torrents/{info_hash}/speed_limit")
-async def set_torrent_speed_limit(info_hash: str, req: SpeedLimitRequest):
+async def set_torrent_speed_limit(
+    info_hash: str,
+    req: SpeedLimitRequest,
+    _: str = Depends(get_current_user),
+):
     success = engine_manager.set_speed_limit(info_hash, req.download_limit)
     if not success:
         raise HTTPException(status_code=404, detail="Torrent not found")
@@ -140,7 +358,11 @@ async def set_torrent_speed_limit(info_hash: str, req: SpeedLimitRequest):
 
 
 @app.delete("/api/torrents/{info_hash}")
-async def delete_torrent(info_hash: str, delete_files: bool = False):
+async def delete_torrent(
+    info_hash: str,
+    delete_files: bool = False,
+    _: str = Depends(get_current_user),
+):
     success = await engine_manager.remove_torrent(info_hash, delete_files=delete_files)
     if not success:
         raise HTTPException(status_code=404, detail="Torrent not found")
@@ -148,7 +370,10 @@ async def delete_torrent(info_hash: str, delete_files: bool = False):
 
 
 @app.get("/api/torrents/{info_hash}/pieces")
-async def get_torrent_pieces(info_hash: str):
+async def get_torrent_pieces(
+    info_hash: str,
+    _: str = Depends(get_current_user),
+):
     session = engine_manager.get_session(info_hash)
     if not session:
         raise HTTPException(status_code=404, detail="Torrent not found")
@@ -160,7 +385,10 @@ async def get_torrent_pieces(info_hash: str):
 
 
 @app.get("/api/torrents/{info_hash}/peers")
-async def get_torrent_peers(info_hash: str):
+async def get_torrent_peers(
+    info_hash: str,
+    _: str = Depends(get_current_user),
+):
     session = engine_manager.get_session(info_hash)
     if not session:
         raise HTTPException(status_code=404, detail="Torrent not found")
@@ -180,11 +408,20 @@ async def get_torrent_peers(info_hash: str):
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
+    # Authenticate WebSocket via session cookie or query param token
+    cookie_token = websocket.cookies.get("evatorrent_session")
+    auth_token = cookie_token or token
+
+    # Check validity
+    user = session_manager.verify_token(auth_token) if auth_token else None
+    if not user:
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
+
     await ws_manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive, listen for ping/messages
             await websocket.receive_text()
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)

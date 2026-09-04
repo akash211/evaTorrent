@@ -1,11 +1,22 @@
 services:
   evatorrent:
-    image: akashkece/evatorrent:0.2.0
+    image: akashkece/evatorrent:0.3.0
     container_name: evatorrent
     restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
       - ./downloads:/downloads
+      - ./data:/root/.evatorrent
     environment:
       - PYTHONUNBUFFERED=1
+      # Initial Administrator Email (or set via Web UI on first launch)
+      - ADMIN_EMAIL=
+      # Optional Google OAuth 2.0 Client ID for Google Sign-In
+      - GOOGLE_CLIENT_ID=
+      # Optional Outbound SMTP for Email OTP delivery (if empty, OTP logs to docker console)
+      - SMTP_HOST=
+      - SMTP_PORT=587
+      - SMTP_USER=
+      - SMTP_PASSWORD=
+      - SMTP_FROM=

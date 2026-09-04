@@ -22,9 +22,14 @@ def create_sample_torrent_bytes() -> bytes:
 
 @pytest.mark.asyncio
 async def test_web_endpoints():
+    from evatorrent.web.app import auth_config, session_manager
+    auth_config.set_admin_email("admin@example.com")
+    token = session_manager.create_token("admin@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        # 1. Index page
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=headers) as client:
+        # 1. Index page (public)
         resp = await client.get("/")
         assert resp.status_code == 200
         assert "evaTorrent" in resp.text

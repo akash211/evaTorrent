@@ -1,7 +1,7 @@
 [project]
 name = "evatorrent"
-version = "0.2.0"
-description = "Modern, high-performance BitTorrent client with asyncio, parallel piece downloading, and a sleek Web UI"
+version = "0.3.0"
+description = "Modern BitTorrent client with asyncio, Email OTP & Google OAuth, parallel downloading, and a sleek Web UI"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [

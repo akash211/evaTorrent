@@ -2,18 +2,23 @@
 
 > High-performance, modern BitTorrent engine and Web UI written in Python 3.12+ with native `asyncio`, managed with `uv`.
 
-evaTorrent is an asynchronous BitTorrent client implementing core BitTorrent specifications (BEP 0003, BEP 0015, BEP 0009), featuring parallel block pipelining, rarest-first piece scheduling, per-torrent download speed throttling, `.part` file preservation, and an interactive dark-mode Web Dashboard with live telemetry over WebSockets.
+evaTorrent is an asynchronous BitTorrent client implementing core BitTorrent specifications (BEP 0003, BEP 0015, BEP 0009), featuring Email OTP & Google OAuth authentication, parallel block pipelining, per-torrent download speed throttling, `.part` file preservation, and an interactive dark-mode Web Dashboard with live telemetry over WebSockets.
 
 ---
 
 ## Features
 
+- 🔐 **Authentication & Security (New in v0.3.0)**:
+  - **Email OTP Sign-In**: Passwordless login with 6-digit cryptographic verification codes sent via SMTP or printed to server/docker logs.
+  - **Google OAuth Login**: Direct one-click login via Google Identity Services (GIS) for authorized administrators.
+  - **Initial Setup Wizard**: Easily configure your administrator email on first launch or directly via environment variables.
+  - **Session & Telemetry Protection**: All REST endpoints and WebSockets are guarded by HMAC-signed session cookies/tokens.
 - ⚡ **Pure Asynchronous Architecture**: Built on modern Python `asyncio` with non-blocking networking.
 - 🚀 **Parallel Downloading & Request Pipelining**: Pipelined block requests across connected peers with rarest-first piece selection for fast downloads.
 - 🎛️ **Per-Torrent Speed Limits**: Adjust max download speed on the fly directly from the Web UI or REST API.
 - 📁 **Incomplete File Safety (`.part`)**: Appends `.part` to files in progress, automatically finalizing and atomically renaming them once verified.
 - 🛑 **Completion & Seeding Control**: Automatically announces completion to trackers and ceases seeding immediately once all pieces are verified.
-- ⚠️ **Stall & Error Detection**: Automatically flags downloads stalled for over 3 minutes with clear error diagnostics and one-click retry.
+- ⚠️ **Stall & Error Detection**: Automatically flags stalled downloads with clear diagnostics and one-click resume.
 - 📦 **Managed with `uv` & Docker Ready**: Single-command runner, official Docker Hub image, and `docker-compose.yml`.
 - 🌐 **Modern Web UI**:
   - Dark mode dashboard with glassmorphism and real-time animations.
@@ -25,13 +30,6 @@ evaTorrent is an asynchronous BitTorrent client implementing core BitTorrent spe
 - 📡 **Dual Tracker Support**:
   - **HTTP/HTTPS Trackers (BEP 0003)**: standard announce protocol with compact peer decoding.
   - **UDP Trackers (BEP 0015)**: binary UDP protocol for modern public trackers.
-- 🧩 **Robust Piece & Block Manager**:
-  - 16 KiB block pipelining with request timeout recovery.
-  - SHA-1 piece checksum verification before persisting to disk.
-- 💾 **Single & Multi-File Storage**: Accurate piece-to-file offset mapping.
-- 💻 **CLI & Web Modes**:
-  - Run the full Web UI server: `evatorrent web`
-  - Download torrents directly in the terminal: `evatorrent download <torrent>`
 
 ---
 
@@ -42,15 +40,26 @@ Create or use the included `docker-compose.yml`:
 ```yaml
 services:
   evatorrent:
-    image: akashkece/evatorrent:0.2.0
+    image: akashkece/evatorrent:0.3.0
     container_name: evatorrent
     restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
       - ./downloads:/downloads
+      - ./data:/root/.evatorrent
     environment:
       - PYTHONUNBUFFERED=1
+      # Initial Admin Email (or set via Web UI on first launch)
+      - ADMIN_EMAIL=your-email@gmail.com
+      # Optional Google OAuth 2.0 Client ID for Google Sign-In
+      - GOOGLE_CLIENT_ID=
+      # Optional Outbound SMTP for Email OTP delivery (if empty, OTP logs to docker console)
+      - SMTP_HOST=
+      - SMTP_PORT=587
+      - SMTP_USER=
+      - SMTP_PASSWORD=
+      - SMTP_FROM=
 ```
 
 Run:
@@ -58,14 +67,9 @@ Run:
 docker compose up -d
 ```
 Open your browser at **[http://localhost:8080](http://localhost:8080)**.
-
-### Using Docker CLI
+If SMTP is not configured, view your login OTP anytime via:
 ```bash
-docker run -d \
-  --name evatorrent \
-  -p 8080:8080 \
-  -v $(pwd)/downloads:/downloads \
-  akashkece/evatorrent:0.2.0
+docker compose logs -f evatorrent
 ```
 
 ---
@@ -90,11 +94,6 @@ uv sync
 uv run evatorrent web --port 8080
 ```
 Open **[http://127.0.0.1:8080](http://127.0.0.1:8080)** in your browser.
-
-### 4. CLI Direct Download
-```bash
-uv run evatorrent download path/to/file.torrent --output downloads/
-```
 
 ---
 
