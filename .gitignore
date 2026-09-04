@@ -53,3 +53,7 @@ torrents/
 # AI documentation (local only)
 AGENTS.md
 
+# Playwright local artifacts
+.playwright/
+.playwright-cli/
+
