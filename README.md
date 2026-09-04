@@ -45,15 +45,19 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
     volumes:
       - ./downloads:/downloads
-      - ./data:/root/.evatorrent
+      - ./data:/data
     environment:
       - PYTHONUNBUFFERED=1
       # Initial Admin Email (or set via Web UI on first launch)
-      - ADMIN_EMAIL=your-email@gmail.com
+      - ADMIN_EMAIL=
       # Optional Google OAuth 2.0 Client ID for Google Sign-In
       - GOOGLE_CLIENT_ID=
+      # Set to true when running behind HTTPS reverse proxy
+      - SECURE_COOKIES=false
       # Optional Outbound SMTP for Email OTP delivery (if empty, OTP logs to docker console)
       - SMTP_HOST=
       - SMTP_PORT=587

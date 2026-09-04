@@ -123,9 +123,16 @@ class PieceManager:
                         if len(blocks_to_request) >= max_count:
                             return blocks_to_request
 
-        # 3. Third priority: start new missing pieces that this peer has
-        for piece_idx in sorted(self.missing_pieces):
-            if piece_idx in peer_pieces and piece_idx not in self.ongoing_pieces:
+        # 3. Third priority: start new missing pieces that this peer has (rarest-first)
+        # Sort by availability (fewest peers → most rare → download first)
+        def _availability(idx: int) -> int:
+            return sum(1 for avail in self.peers.values() if idx in avail)
+
+        rarest_missing = sorted(
+            (idx for idx in self.missing_pieces if idx in peer_pieces and idx not in self.ongoing_pieces),
+            key=_availability,
+        )
+        for piece_idx in rarest_missing:
                 self.missing_pieces.remove(piece_idx)
                 self.ongoing_pieces.add(piece_idx)
                 piece = self.pieces[piece_idx]

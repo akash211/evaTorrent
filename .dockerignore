@@ -1,0 +1,17 @@
+.git
+.venv
+.env
+__pycache__
+*.pyc
+dist
+tests
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+downloads
+data
+sample.torrent
+.DS_Store
+.idea
+.vscode

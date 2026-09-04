@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Callable, Optional, Set, Tuple
+from typing import Callable, Dict, Optional, Set, Tuple
 
 from evatorrent.peer.protocol import (
     Bitfield,

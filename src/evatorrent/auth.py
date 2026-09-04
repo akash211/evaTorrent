@@ -191,9 +191,12 @@ class SessionManager:
 class OTPManager:
     """Generates and verifies one-time login passwords."""
 
+    MAX_ATTEMPTS = 5  # Max failed verification attempts before lockout
+    LOCKOUT_SECONDS = 900.0  # 15 minutes lockout after exceeding max attempts
+
     def __init__(self, expiry_seconds: int = 600):
         self.expiry_seconds = expiry_seconds
-        # email -> {"otp": "123456", "expires_at": float, "last_requested": float}
+        # email -> {"otp": "123456", "expires_at": float, "last_requested": float, "failed_attempts": int, "locked_until": float}
         self._otps: Dict[str, Dict[str, Any]] = {}
 
     def generate_otp(self, email: str) -> Tuple[bool, str, Optional[str]]:
@@ -201,6 +204,12 @@ class OTPManager:
         now = time.time()
 
         existing = self._otps.get(clean_email)
+
+        # Check lockout
+        if existing and existing.get("locked_until", 0) > now:
+            remaining = int(existing["locked_until"] - now)
+            return False, f"Too many failed attempts. Locked for {remaining}s.", None
+
         if existing and (now - existing["last_requested"]) < 25.0:
             remaining = int(25.0 - (now - existing["last_requested"]))
             return False, f"Please wait {remaining}s before requesting a new code.", None
@@ -211,6 +220,8 @@ class OTPManager:
             "otp": otp,
             "expires_at": now + self.expiry_seconds,
             "last_requested": now,
+            "failed_attempts": 0,
+            "locked_until": 0,
         }
         return True, "OTP generated successfully", otp
 
@@ -222,7 +233,13 @@ class OTPManager:
         if not record:
             return False
 
-        if time.time() > record["expires_at"]:
+        now = time.time()
+
+        # Check lockout
+        if record.get("locked_until", 0) > now:
+            return False
+
+        if now > record["expires_at"]:
             self._otps.pop(clean_email, None)
             return False
 
@@ -230,6 +247,12 @@ class OTPManager:
             # Consume OTP
             self._otps.pop(clean_email, None)
             return True
+
+        # Failed attempt
+        record["failed_attempts"] = record.get("failed_attempts", 0) + 1
+        if record["failed_attempts"] >= self.MAX_ATTEMPTS:
+            record["locked_until"] = now + self.LOCKOUT_SECONDS
+            logger.warning(f"OTP brute-force lockout triggered for {clean_email}")
 
         return False
 

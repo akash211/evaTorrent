@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+
+MAX_TORRENT_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 
 from fastapi import (
     Cookie,
@@ -77,7 +80,7 @@ app = FastAPI(title="evaTorrent API", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -156,7 +159,7 @@ async def auth_status(
         "setup_required": not auth_config.is_setup_done,
         "admin_email_masked": display_admin,
         "google_enabled": bool(auth_config.google_client_id),
-        "google_client_id": auth_config.google_client_id,
+        "google_client_id": auth_config.google_client_id if verified_email else None,
         "is_authenticated": verified_email is not None,
         "user_email": verified_email,
         "smtp_configured": auth_config.is_smtp_configured,
@@ -183,6 +186,7 @@ async def initial_setup(req: SetupRequest, response: Response):
         value=token,
         httponly=True,
         samesite="lax",
+        secure=os.environ.get("SECURE_COOKIES", "").lower() in ("1", "true", "yes"),
         max_age=86400 * 30,
     )
     return {"success": True, "token": token, "email": email}
@@ -229,6 +233,7 @@ async def verify_otp(req: OTPVerifyRequest, response: Response):
         value=token,
         httponly=True,
         samesite="lax",
+        secure=os.environ.get("SECURE_COOKIES", "").lower() in ("1", "true", "yes"),
         max_age=86400 * 30,
     )
     return {"success": True, "token": token, "email": email}
@@ -253,6 +258,7 @@ async def google_login(req: GoogleAuthRequest, response: Response):
         value=token,
         httponly=True,
         samesite="lax",
+        secure=os.environ.get("SECURE_COOKIES", "").lower() in ("1", "true", "yes"),
         max_age=86400 * 30,
     )
     return {"success": True, "token": token, "email": verified_email}
@@ -299,9 +305,13 @@ async def upload_torrent(
     _: str = Depends(get_current_user),
 ):
     try:
-        content = await file.read()
+        content = await file.read(MAX_TORRENT_UPLOAD_BYTES + 1)
+        if len(content) > MAX_TORRENT_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Torrent file exceeds 10 MB size limit.")
         session = engine_manager.add_torrent_bytes(content)
         return {"success": True, "info_hash": session.torrent.info_hash_hex, "name": session.torrent.name}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse torrent: {e}")
 
