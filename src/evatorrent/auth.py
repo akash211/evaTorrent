@@ -188,14 +188,18 @@ class SessionManager:
             return None
 
 
+from evatorrent.db.database import Database
+
+
 class OTPManager:
-    """Generates and verifies one-time login passwords."""
+    """Generates and verifies one-time login passwords with persistent storage."""
 
     MAX_ATTEMPTS = 5  # Max failed verification attempts before lockout
     LOCKOUT_SECONDS = 900.0  # 15 minutes lockout after exceeding max attempts
 
-    def __init__(self, expiry_seconds: int = 600):
+    def __init__(self, expiry_seconds: int = 600, db: Optional[Database] = None):
         self.expiry_seconds = expiry_seconds
+        self.db = db
         # email -> {"otp": "123456", "expires_at": float, "last_requested": float, "failed_attempts": int, "locked_until": float}
         self._otps: Dict[str, Dict[str, Any]] = {}
 
@@ -203,7 +207,10 @@ class OTPManager:
         clean_email = email.strip().lower()
         now = time.time()
 
-        existing = self._otps.get(clean_email)
+        if self.db:
+            existing = self.db.get_otp_record(clean_email)
+        else:
+            existing = self._otps.get(clean_email)
 
         # Check lockout
         if existing and existing.get("locked_until", 0) > now:
@@ -216,20 +223,29 @@ class OTPManager:
 
         # 6-digit random numeric code
         otp = f"{secrets.randbelow(1_000_000):06d}"
-        self._otps[clean_email] = {
-            "otp": otp,
-            "expires_at": now + self.expiry_seconds,
-            "last_requested": now,
-            "failed_attempts": 0,
-            "locked_until": 0,
-        }
+        expires_at = now + self.expiry_seconds
+
+        if self.db:
+            self.db.save_otp(clean_email, otp, expires_at, now)
+        else:
+            self._otps[clean_email] = {
+                "otp": otp,
+                "expires_at": expires_at,
+                "last_requested": now,
+                "failed_attempts": 0,
+                "locked_until": 0,
+            }
         return True, "OTP generated successfully", otp
 
     def verify_otp(self, email: str, code: str) -> bool:
         clean_email = email.strip().lower()
         clean_code = code.strip()
 
-        record = self._otps.get(clean_email)
+        if self.db:
+            record = self.db.get_otp_record(clean_email)
+        else:
+            record = self._otps.get(clean_email)
+
         if not record:
             return False
 
@@ -240,19 +256,30 @@ class OTPManager:
             return False
 
         if now > record["expires_at"]:
-            self._otps.pop(clean_email, None)
+            if self.db:
+                self.db.delete_otp(clean_email)
+            else:
+                self._otps.pop(clean_email, None)
             return False
 
         if hmac.compare_digest(record["otp"], clean_code):
             # Consume OTP
-            self._otps.pop(clean_email, None)
+            if self.db:
+                self.db.delete_otp(clean_email)
+            else:
+                self._otps.pop(clean_email, None)
             return True
 
         # Failed attempt
-        record["failed_attempts"] = record.get("failed_attempts", 0) + 1
-        if record["failed_attempts"] >= self.MAX_ATTEMPTS:
-            record["locked_until"] = now + self.LOCKOUT_SECONDS
-            logger.warning(f"OTP brute-force lockout triggered for {clean_email}")
+        if self.db:
+            attempts, _ = self.db.record_otp_failure(clean_email, self.MAX_ATTEMPTS, self.LOCKOUT_SECONDS)
+            if attempts >= self.MAX_ATTEMPTS:
+                logger.warning(f"OTP brute-force lockout triggered for {clean_email}")
+        else:
+            record["failed_attempts"] = record.get("failed_attempts", 0) + 1
+            if record["failed_attempts"] >= self.MAX_ATTEMPTS:
+                record["locked_until"] = now + self.LOCKOUT_SECONDS
+                logger.warning(f"OTP brute-force lockout triggered for {clean_email}")
 
         return False
 

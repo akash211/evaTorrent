@@ -8,20 +8,28 @@ evaTorrent is an asynchronous BitTorrent client implementing core BitTorrent spe
 
 ## Features
 
+- 📊 **Swarm Analytics & Persistent History (New)**:
+  - **SQLite Lifetime Persistence (`eva.db`)**: Stores all torrent lifecycle events and metrics permanently, even after torrent removal or failure.
+  - **Swarm Analytics Dashboard**: Filter historical records by status (completed, active, paused, errored, removed), search by name or hash, and view KPI aggregates.
+  - **CSV Export**: Instant one-click export of complete historical download/upload logs to `.csv`.
+  - **Lifecycle Audit Trail**: Drill into any historical torrent to view detailed timestamps for addition, pauses, resumes, errors, completion, and removal.
 - 🔐 **Authentication & Security (New in v0.3.0)**:
   - **Email OTP Sign-In**: Passwordless login with 6-digit cryptographic verification codes sent via SMTP or printed to server/docker logs.
   - **Google OAuth Login**: Direct one-click login via Google Identity Services (GIS) for authorized administrators.
   - **Initial Setup Wizard**: Easily configure your administrator email on first launch or directly via environment variables.
-  - **Session & Telemetry Protection**: All REST endpoints and WebSockets are guarded by HMAC-signed session cookies/tokens.
+  - **Rate Limiting & Protection**: 2 requests/min per IP rate limiting on authentication endpoints, plus HMAC-signed session cookies.
+  - **HTTPS Redirection**: Automatic HTTPS redirection for domain requests while keeping `localhost` easy on plain HTTP.
 - ⚡ **Pure Asynchronous Architecture**: Built on modern Python `asyncio` with non-blocking networking.
 - 🚀 **Parallel Downloading & Request Pipelining**: Pipelined block requests across connected peers with rarest-first piece selection for fast downloads.
+- 📤 **Block Serving & Live Upload Speed**: Serves verified pieces to requesting peers with real-time upload speed monitoring.
+- 🛑 **Completion & Seeding Control**: Automatically announces completion to trackers and ceases seeding immediately once all pieces are 100% verified. If downloaded files are removed and a torrent is resumed, it automatically restarts from 0%.
 - 🎛️ **Per-Torrent Speed Limits**: Adjust max download speed on the fly directly from the Web UI or REST API.
 - 📁 **Incomplete File Safety (`.part`)**: Appends `.part` to files in progress, automatically finalizing and atomically renaming them once verified.
-- 🛑 **Completion & Seeding Control**: Automatically announces completion to trackers and ceases seeding immediately once all pieces are verified.
 - ⚠️ **Stall & Error Detection**: Automatically flags stalled downloads with clear diagnostics and one-click resume.
 - 📦 **Managed with `uv` & Docker Ready**: Single-command runner, official Docker Hub image, and `docker-compose.yml`.
 - 🌐 **Modern Web UI**:
   - Dark mode dashboard with glassmorphism and real-time animations.
+  - Dual tabs: **Live Swarm** and **Swarm Analytics 📊**.
   - Live WebSocket telemetry (download/upload speed gauges, active peers, progress).
   - Interactive **Piece Map Visualizer** displaying real-time piece completion and in-flight blocks.
   - Peer Inspector showing swarm connection states, unchoked flags, and peer transfer speeds.
@@ -58,6 +66,8 @@ services:
       - GOOGLE_CLIENT_ID=
       # Set to true when running behind HTTPS reverse proxy
       - SECURE_COOKIES=false
+      # Set to true to enforce automatic HTTPS redirect for all non-local domain requests
+      - ENFORCE_HTTPS=false
       # Optional Outbound SMTP for Email OTP delivery (if empty, OTP logs to docker console)
       - SMTP_HOST=
       - SMTP_PORT=587

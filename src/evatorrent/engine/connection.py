@@ -62,8 +62,11 @@ class PeerConnection:
         # Speed tracking
         self.bytes_downloaded: int = 0
         self.download_speed: float = 0.0  # Bytes/sec
+        self.bytes_uploaded: int = 0
+        self.upload_speed: float = 0.0  # Bytes/sec
         self._last_speed_check: float = time.time()
         self._bytes_since_last_check: int = 0
+        self._bytes_uploaded_since_last_check: int = 0
 
         self._task: Optional[asyncio.Task] = None
         # In-flight block requests: map of (piece_index, begin_offset) -> request_timestamp
@@ -184,6 +187,13 @@ class PeerConnection:
             if self.on_data_received:
                 self.on_data_received()
             self.piece_manager.on_block_received(msg.index, msg.begin, msg.block)
+        elif isinstance(msg, Request):
+            block_data = self.piece_manager.read_block(msg.index, msg.begin, msg.length)
+            if block_data:
+                piece_msg = Piece(index=msg.index, begin=msg.begin, block=block_data)
+                asyncio.create_task(self.send_message(piece_msg))
+                self.bytes_uploaded += len(block_data)
+                self._bytes_uploaded_since_last_check += len(block_data)
         elif isinstance(msg, KeepAlive):
             pass
 
@@ -219,10 +229,12 @@ class PeerConnection:
                 await asyncio.sleep(0.1)
 
     def update_speed(self) -> None:
-        """Calculates current download speed over the elapsed time interval."""
+        """Calculates current download and upload speeds over the elapsed time interval."""
         now = time.time()
         elapsed = now - self._last_speed_check
         if elapsed >= 1.0:
             self.download_speed = self._bytes_since_last_check / elapsed
+            self.upload_speed = self._bytes_uploaded_since_last_check / elapsed
             self._bytes_since_last_check = 0
+            self._bytes_uploaded_since_last_check = 0
             self._last_speed_check = now

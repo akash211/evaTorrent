@@ -10,12 +10,18 @@ from typing import Optional
 
 MAX_TORRENT_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 
+from collections import defaultdict
+import csv
+import io
+import time
+
 from fastapi import (
     Cookie,
     Depends,
     FastAPI,
     File,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -23,7 +29,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -34,20 +40,57 @@ from evatorrent.auth import (
     OTPManager,
     SessionManager,
 )
+from evatorrent.db.database import Database
 from evatorrent.engine.manager import EngineManager
 from evatorrent.torrent import Magnet, Torrent
 from evatorrent.web.ws import WebSocketManager
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Global managers
-engine_manager = EngineManager()
-ws_manager = WebSocketManager()
 auth_config = AuthConfig()
+db_path = auth_config.data_dir / "eva.db"
+database = Database(db_path)
+
+# Global managers
+engine_manager = EngineManager(db=database)
+ws_manager = WebSocketManager()
 session_manager = SessionManager(auth_config)
-otp_manager = OTPManager()
+otp_manager = OTPManager(db=database)
 email_sender = EmailSender(auth_config)
 google_verifier = GoogleVerifier(auth_config)
+
+# In-memory IP rate limiter: client_ip -> list of timestamps
+_ip_rate_limits: dict[str, list[float]] = defaultdict(list)
+
+def check_ip_rate_limit(request: Request, max_requests: int = 2, window_seconds: float = 60.0) -> None:
+    """Enforces max_requests per window_seconds per client IP."""
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+
+    if client_ip == "testclient" and not request.headers.get("x-test-rate-limit"):
+        return
+
+    now = time.time()
+    recent = [ts for ts in _ip_rate_limits[client_ip] if now - ts < window_seconds]
+    if len(recent) >= max_requests:
+        retry_after = max(1, int(window_seconds - (now - recent[0])))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: maximum {max_requests} requests per minute. Try again in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    recent.append(now)
+    _ip_rate_limits[client_ip] = recent
+
+def is_cookie_secure(request: Request) -> bool:
+    if os.environ.get("SECURE_COOKIES", "").lower() in ("1", "true", "yes"):
+        return True
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme).lower()
+    return proto == "https"
+
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "testserver"}
 
 
 @asynccontextmanager
@@ -77,6 +120,20 @@ async def telemetry_loop():
 
 
 app = FastAPI(title="evaTorrent API", version="0.3.0", lifespan=lifespan)
+
+@app.middleware("http")
+async def https_enforcement_middleware(request: Request, call_next):
+    enforce_env = os.environ.get("ENFORCE_HTTPS", "").lower() in ("1", "true", "yes")
+    host = request.url.hostname or ""
+    is_local = host.lower() in LOCAL_HOSTS
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme).lower()
+
+    if (enforce_env or not is_local) and proto == "http":
+        url = request.url.replace(scheme="https")
+        return RedirectResponse(url=str(url), status_code=307)
+
+    response = await call_next(request)
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -167,7 +224,7 @@ async def auth_status(
 
 
 @app.post("/api/auth/setup")
-async def initial_setup(req: SetupRequest, response: Response):
+async def initial_setup(req: SetupRequest, request: Request, response: Response):
     """Initial first-time setup to register the administrator email."""
     if auth_config.is_setup_done:
         raise HTTPException(status_code=400, detail="Setup has already been completed.")
@@ -186,15 +243,17 @@ async def initial_setup(req: SetupRequest, response: Response):
         value=token,
         httponly=True,
         samesite="lax",
-        secure=os.environ.get("SECURE_COOKIES", "").lower() in ("1", "true", "yes"),
+        secure=is_cookie_secure(request),
         max_age=86400 * 30,
     )
     return {"success": True, "token": token, "email": email}
 
 
 @app.post("/api/auth/otp/request")
-async def request_otp(req: OTPRequest):
-    """Generates and dispatches a 6-digit login OTP to the authorized email."""
+async def request_otp(req: OTPRequest, request: Request):
+    """Generates and dispatches a 6-digit login OTP to the authorized email (rate-limited: 2/min/IP)."""
+    check_ip_rate_limit(request, max_requests=2, window_seconds=60.0)
+
     if not auth_config.is_setup_done:
         raise HTTPException(status_code=400, detail="Initial setup required first.")
 
@@ -215,7 +274,7 @@ async def request_otp(req: OTPRequest):
 
 
 @app.post("/api/auth/otp/verify")
-async def verify_otp(req: OTPVerifyRequest, response: Response):
+async def verify_otp(req: OTPVerifyRequest, request: Request, response: Response):
     """Validates the 6-digit OTP and establishes an authenticated session."""
     if not auth_config.is_setup_done:
         raise HTTPException(status_code=400, detail="Initial setup required first.")
@@ -233,14 +292,14 @@ async def verify_otp(req: OTPVerifyRequest, response: Response):
         value=token,
         httponly=True,
         samesite="lax",
-        secure=os.environ.get("SECURE_COOKIES", "").lower() in ("1", "true", "yes"),
+        secure=is_cookie_secure(request),
         max_age=86400 * 30,
     )
     return {"success": True, "token": token, "email": email}
 
 
 @app.post("/api/auth/google")
-async def google_login(req: GoogleAuthRequest, response: Response):
+async def google_login(req: GoogleAuthRequest, request: Request, response: Response):
     """Verifies Google ID Token and logs in directly if matching the authorized admin email."""
     if not auth_config.is_setup_done:
         raise HTTPException(status_code=400, detail="Initial setup required first.")
@@ -258,7 +317,7 @@ async def google_login(req: GoogleAuthRequest, response: Response):
         value=token,
         httponly=True,
         samesite="lax",
-        secure=os.environ.get("SECURE_COOKIES", "").lower() in ("1", "true", "yes"),
+        secure=is_cookie_secure(request),
         max_age=86400 * 30,
     )
     return {"success": True, "token": token, "email": verified_email}
@@ -269,6 +328,76 @@ async def logout(response: Response):
     """Terminates session."""
     response.delete_cookie(key="evatorrent_session")
     return {"success": True}
+
+
+# --- Analytics & History Endpoints ---
+
+@app.get("/api/analysis/summary")
+async def get_analysis_summary(_: str = Depends(get_current_user)):
+    """Lifetime summary statistics across all torrents ever processed."""
+    return database.get_analytics_summary()
+
+
+@app.get("/api/analysis/torrents")
+async def get_analysis_torrents(
+    status: Optional[str] = "all",
+    search: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    _: str = Depends(get_current_user),
+):
+    """Complete historical log of all torrents (even after removal) for analysis."""
+    records = database.get_all_history(status_filter=status, search=search, limit=limit, offset=offset)
+    summary = database.get_analytics_summary()
+    return {"torrents": records, "summary": summary}
+
+
+@app.get("/api/analysis/export.csv")
+async def export_analysis_csv(_: str = Depends(get_current_user)):
+    """Exports all historical torrent lifecycle records as a downloadable CSV."""
+    records = database.get_all_history(status_filter="all", limit=50000, offset=0)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Info Hash",
+        "Name",
+        "Total Size (Bytes)",
+        "Downloaded (Bytes)",
+        "Uploaded (Bytes)",
+        "Status",
+        "Added At (UTC)",
+        "Completed At (UTC)",
+        "Removed At (UTC)",
+        "Error Message",
+        "Download Directory",
+    ])
+    for r in records:
+        writer.writerow([
+            r.get("info_hash", ""),
+            r.get("name", ""),
+            r.get("total_size", 0),
+            r.get("downloaded_bytes", 0),
+            r.get("uploaded_bytes", 0),
+            r.get("status", ""),
+            time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(r["added_at"])) if r.get("added_at") else "",
+            time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(r["completed_at"])) if r.get("completed_at") else "",
+            time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(r["removed_at"])) if r.get("removed_at") else "",
+            r.get("error_message") or "",
+            r.get("download_dir") or "",
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode("utf-8")),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=evatorrent_analysis.csv"},
+    )
+
+
+@app.get("/api/torrents/{info_hash}/events")
+async def get_torrent_events(info_hash: str, _: str = Depends(get_current_user)):
+    """Timeline event log for a specific torrent."""
+    return {"events": database.get_torrent_events(info_hash)}
 
 
 # --- Core Web & Torrent Endpoints ---

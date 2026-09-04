@@ -94,7 +94,7 @@ def test_auth_endpoints_and_route_protection():
         assert resp_otp_ok.status_code == 200
 
         # Retrieve generated OTP from manager for test
-        record = otp_manager._otps.get("admin@example.com")
+        record = otp_manager.db.get_otp_record("admin@example.com") if otp_manager.db else otp_manager._otps.get("admin@example.com")
         assert record is not None
         code = record["otp"]
 

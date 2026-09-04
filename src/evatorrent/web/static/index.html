@@ -44,6 +44,17 @@
         </div>
       </div>
 
+      <div class="nav-view-switcher">
+        <button id="nav-btn-live" class="view-tab-btn active" onclick="switchMainView('live')">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+          Live Swarm
+        </button>
+        <button id="nav-btn-analytics" class="view-tab-btn" onclick="switchMainView('analytics')">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          Swarm Analytics 📊
+        </button>
+      </div>
+
       <div class="nav-actions">
         <div id="nav-user-group" class="nav-user-group hidden">
           <span id="user-display" class="user-badge"></span>
@@ -61,38 +72,121 @@
 
     <!-- Main Content Area -->
     <main class="main-layout">
-      <!-- Toolbar / Filters -->
-      <section class="toolbar">
-        <div class="filter-tabs">
-          <button class="filter-tab active" data-filter="all">All Torrents (<span id="count-all">0</span>)</button>
-          <button class="filter-tab" data-filter="downloading">Downloading (<span id="count-dl">0</span>)</button>
-          <button class="filter-tab" data-filter="completed">Completed (<span id="count-done">0</span>)</button>
-          <button class="filter-tab" data-filter="paused">Paused (<span id="count-paused">0</span>)</button>
-          <button class="filter-tab" data-filter="error">Errored (<span id="count-err">0</span>)</button>
-        </div>
-        <div class="toolbar-search">
-          <input type="text" id="search-input" placeholder="Search torrents by name or hash..." />
-        </div>
-      </section>
-
-      <!-- Torrent List or Empty State -->
-      <section class="torrent-section">
-        <div id="torrent-list" class="torrent-grid"></div>
-
-        <!-- Empty State -->
-        <div id="empty-state" class="empty-state">
-          <div class="empty-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="7 10 12 15 17 10"></polyline>
-              <line x1="12" y1="15" x2="12" y2="3"></line>
-            </svg>
+      <!-- Live Dashboard View -->
+      <div id="view-pane-live" class="view-pane active">
+        <!-- Toolbar / Filters -->
+        <section class="toolbar">
+          <div class="filter-tabs">
+            <button class="filter-tab active" data-filter="all">All Torrents (<span id="count-all">0</span>)</button>
+            <button class="filter-tab" data-filter="downloading">Downloading (<span id="count-dl">0</span>)</button>
+            <button class="filter-tab" data-filter="completed">Completed (<span id="count-done">0</span>)</button>
+            <button class="filter-tab" data-filter="paused">Paused (<span id="count-paused">0</span>)</button>
+            <button class="filter-tab" data-filter="error">Errored (<span id="count-err">0</span>)</button>
           </div>
-          <h3>No Torrents Added Yet</h3>
-          <p>Drop a <code>.torrent</code> file anywhere or click below to start downloading.</p>
-          <button class="btn btn-secondary" onclick="openAddModal()">Add Your First Torrent</button>
+          <div class="toolbar-search">
+            <input type="text" id="search-input" placeholder="Search active torrents by name or hash..." />
+          </div>
+        </section>
+
+        <!-- Torrent List or Empty State -->
+        <section class="torrent-section">
+          <div id="torrent-list" class="torrent-grid"></div>
+
+          <!-- Empty State -->
+          <div id="empty-state" class="empty-state">
+            <div class="empty-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+            </div>
+            <h3>No Torrents Added Yet</h3>
+            <p>Drop a <code>.torrent</code> file anywhere or click below to start downloading.</p>
+            <button class="btn btn-secondary" onclick="openAddModal()">Add Your First Torrent</button>
+          </div>
+        </section>
+      </div>
+
+      <!-- Historical Analytics View -->
+      <div id="view-pane-analytics" class="view-pane hidden">
+        <!-- KPI Cards -->
+        <div class="analytics-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">Total Logged Torrents</span>
+            <span class="kpi-value highlight-cyan" id="kpi-total-torrents">0</span>
+            <span class="kpi-sub">Persistent lifetime database records</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Completion Success Rate</span>
+            <span class="kpi-value highlight-mint" id="kpi-success-rate">0%</span>
+            <span class="kpi-sub" id="kpi-completed-count">0 completed successfully</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Lifetime Downloaded</span>
+            <span class="kpi-value" id="kpi-total-downloaded">0.0 MB</span>
+            <span class="kpi-sub" id="kpi-total-size">Total dataset size: 0.0 MB</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Lifetime Uploaded</span>
+            <span class="kpi-value highlight-purple" id="kpi-total-uploaded">0.0 MB</span>
+            <span class="kpi-sub">Total swarm seeding contributions</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Avg Completion Time</span>
+            <span class="kpi-value" id="kpi-avg-time">--</span>
+            <span class="kpi-sub">Addition to 100% verified</span>
+          </div>
         </div>
-      </section>
+
+        <!-- Filter & Action Controls -->
+        <div class="analytics-toolbar">
+          <div class="analytics-search-wrap">
+            <input type="text" id="analytics-search-input" placeholder="Search archive by name or hash..." oninput="handleAnalyticsFilter()" />
+          </div>
+          <div class="analytics-filter-controls">
+            <select id="analytics-status-filter" class="select-control" onchange="handleAnalyticsFilter()">
+              <option value="all">All Statuses (Archive)</option>
+              <option value="completed">Completed</option>
+              <option value="downloading">Downloading</option>
+              <option value="paused">Paused</option>
+              <option value="error">Errored</option>
+              <option value="removed">Removed from Engine</option>
+            </select>
+            <button class="btn btn-secondary" onclick="loadAnalyticsData()" title="Reload table from SQLite database">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              Refresh
+            </button>
+            <a href="/api/analysis/export.csv" class="btn btn-primary" download="evatorrent_analysis.csv" title="Download historical CSV export">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export CSV
+            </a>
+          </div>
+        </div>
+
+        <!-- History Table -->
+        <div class="analytics-table-container">
+          <table class="analytics-table">
+            <thead>
+              <tr>
+                <th>Torrent Name & Hash</th>
+                <th>Total Size</th>
+                <th>Downloaded</th>
+                <th>Uploaded</th>
+                <th>Status</th>
+                <th>Added Date (UTC)</th>
+                <th>Completed / Removed (UTC)</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="analytics-table-body">
+              <tr>
+                <td colspan="8" class="text-center py-6">Loading historical data...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       <!-- Detail Inspector Drawer / Modal -->
       <div id="inspector-overlay" class="inspector-overlay hidden" onclick="closeInspector()"></div>
@@ -317,6 +411,22 @@
               Google Client ID is not configured. Use Email OTP to log in.
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lifecycle Events Modal -->
+    <div id="modal-events" class="modal-overlay hidden">
+      <div class="modal-content modal-events-card">
+        <div class="modal-header">
+          <div>
+            <h3 id="events-modal-title">Torrent Lifecycle Log</h3>
+            <p id="events-modal-subtitle" style="font-size: 0.78rem; color: var(--text-muted); margin: 0;"></p>
+          </div>
+          <button class="btn-icon close-modal" onclick="closeEventsModal()">&times;</button>
+        </div>
+        <div class="modal-body" style="max-height: 480px; overflow-y: auto;">
+          <div id="events-timeline" class="events-timeline"></div>
         </div>
       </div>
     </div>

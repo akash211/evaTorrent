@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from evatorrent.db.database import Database
 from evatorrent.engine.session import TorrentSession
 from evatorrent.torrent import Torrent
 
@@ -16,10 +17,11 @@ logger = logging.getLogger(__name__)
 class EngineManager:
     """Manages all active BitTorrent sessions in the evaTorrent engine."""
 
-    def __init__(self, default_download_dir: Optional[Path] = None):
+    def __init__(self, default_download_dir: Optional[Path] = None, db: Optional[Database] = None):
         self.download_dir = Path(default_download_dir or Path.home() / "Downloads" / "evaTorrent")
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: Dict[str, TorrentSession] = {}
+        self.db = db
 
     def add_torrent(self, torrent: Torrent, output_dir: Optional[Path] = None) -> TorrentSession:
         info_hash_hex = torrent.info_hash_hex
@@ -27,8 +29,18 @@ class EngineManager:
             return self.sessions[info_hash_hex]
 
         dest_dir = output_dir or self.download_dir
-        session = TorrentSession(torrent=torrent, download_dir=dest_dir)
+        session = TorrentSession(torrent=torrent, download_dir=dest_dir, db=self.db)
         self.sessions[info_hash_hex] = session
+
+        if self.db:
+            self.db.upsert_torrent(
+                info_hash=info_hash_hex,
+                name=torrent.name,
+                total_size=torrent.total_length,
+                download_dir=str(dest_dir),
+                status=session.status.value,
+            )
+
         session.start()
         return session
 
@@ -47,6 +59,8 @@ class EngineManager:
         session = self.get_session(info_hash_hex)
         if session:
             await session.pause()
+            if self.db:
+                self.db.log_event(info_hash_hex, "PAUSED", "Torrent paused by user")
             return True
         return False
 
@@ -54,6 +68,8 @@ class EngineManager:
         session = self.get_session(info_hash_hex)
         if session:
             session.resume()
+            if self.db:
+                self.db.log_event(info_hash_hex, "RESUMED", "Torrent resumed by user")
             return True
         return False
 
@@ -69,6 +85,15 @@ class EngineManager:
         session = self.sessions.pop(key, None)
         if session:
             await session.stop()
+
+            if self.db:
+                self.db.mark_torrent_removed(
+                    info_hash=key,
+                    deleted_files=delete_files,
+                    downloaded_bytes=session.piece_manager.bytes_downloaded,
+                    uploaded_bytes=session.piece_manager.bytes_uploaded,
+                )
+
             if delete_files:
                 try:
                     for f in session.torrent.files:

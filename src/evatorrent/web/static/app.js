@@ -743,3 +743,201 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 });
+
+// --- View Switching (Live Swarm vs Swarm Analytics) ---
+
+let currentMainView = 'live';
+
+function switchMainView(view) {
+  currentMainView = view;
+  const btnLive = document.getElementById('nav-btn-live');
+  const btnAnalytics = document.getElementById('nav-btn-analytics');
+  const paneLive = document.getElementById('view-pane-live');
+  const paneAnalytics = document.getElementById('view-pane-analytics');
+
+  if (view === 'live') {
+    btnLive.classList.add('active');
+    btnAnalytics.classList.remove('active');
+    paneLive.classList.remove('hidden');
+    paneAnalytics.classList.add('hidden');
+  } else {
+    btnLive.classList.remove('active');
+    btnAnalytics.classList.add('active');
+    paneLive.classList.add('hidden');
+    paneAnalytics.classList.remove('hidden');
+    loadAnalyticsData();
+  }
+}
+
+// --- Swarm Analytics Archive & Reporting ---
+
+let analyticsRecords = [];
+let analyticsFilterTimeout = null;
+
+async function loadAnalyticsData() {
+  const status = document.getElementById('analytics-status-filter')?.value || 'all';
+  const search = document.getElementById('analytics-search-input')?.value.trim() || '';
+
+  const tbody = document.getElementById('analytics-table-body');
+  if (tbody) {
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-6" style="color: var(--text-muted);">Fetching analytics data from SQLite archive...</td></tr>`;
+  }
+
+  try {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (search) params.set('search', search);
+
+    const res = await fetch(`/api/analysis/torrents?${params.toString()}`);
+    if (!res.ok) {
+      if (res.status === 401) {
+        checkAuth();
+        return;
+      }
+      throw new Error(`Failed to load: ${res.statusText}`);
+    }
+
+    const data = await res.json();
+    analyticsRecords = data.torrents || [];
+    renderAnalyticsSummary(data.summary || {});
+    renderAnalyticsTable(analyticsRecords);
+  } catch (err) {
+    console.error('Error loading analytics:', err);
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="8" class="text-center py-6" style="color: var(--accent-red);">Failed to load analytics: ${err.message}</td></tr>`;
+    }
+  }
+}
+
+function renderAnalyticsSummary(summary) {
+  const totalEl = document.getElementById('kpi-total-torrents');
+  const rateEl = document.getElementById('kpi-success-rate');
+  const completedEl = document.getElementById('kpi-completed-count');
+  const dlEl = document.getElementById('kpi-total-downloaded');
+  const sizeEl = document.getElementById('kpi-total-size');
+  const ulEl = document.getElementById('kpi-total-uploaded');
+  const avgEl = document.getElementById('kpi-avg-time');
+
+  if (totalEl) totalEl.textContent = (summary.total_torrents || 0).toLocaleString();
+  if (rateEl) rateEl.textContent = `${summary.success_rate || 0}%`;
+  if (completedEl) completedEl.textContent = `${summary.completed_torrents || 0} completed successfully`;
+  if (dlEl) dlEl.textContent = formatBytes(summary.total_downloaded_bytes || 0);
+  if (sizeEl) sizeEl.textContent = `Total dataset size: ${formatBytes(summary.total_size || 0)}`;
+  if (ulEl) ulEl.textContent = formatBytes(summary.total_uploaded_bytes || 0);
+
+  const avgSec = summary.avg_completion_time_seconds || 0;
+  let avgText = '--';
+  if (avgSec > 0) {
+    if (avgSec < 60) avgText = `${Math.round(avgSec)}s`;
+    else if (avgSec < 3600) avgText = `${Math.round(avgSec / 60)}m`;
+    else avgText = `${(avgSec / 3600).toFixed(1)}h`;
+  }
+  if (avgEl) avgEl.textContent = avgText;
+}
+
+function renderAnalyticsTable(records) {
+  const tbody = document.getElementById('analytics-table-body');
+  if (!tbody) return;
+
+  if (!records || records.length === 0) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="8" class="text-center py-6" style="color: var(--text-muted);">
+          No historical records found matching current criteria.
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  tbody.innerHTML = records.map(r => {
+    const statusClass = `badge-${r.status || 'unknown'}`;
+    const addedStr = r.added_at ? new Date(r.added_at * 1000).toISOString().replace('T', ' ').slice(0, 19) : '--';
+    let endStr = '--';
+    if (r.completed_at) {
+      endStr = `Done: ${new Date(r.completed_at * 1000).toISOString().replace('T', ' ').slice(0, 19)}`;
+    } else if (r.removed_at) {
+      endStr = `Removed: ${new Date(r.removed_at * 1000).toISOString().replace('T', ' ').slice(0, 19)}`;
+    }
+
+    const safeName = escapeHtml(r.name || 'Unnamed Torrent');
+    const safeHash = escapeHtml(r.info_hash || '');
+    const shortHash = safeHash.slice(0, 12) + '...';
+
+    return `
+      <tr>
+        <td class="torrent-title-cell">
+          <span class="torrent-title-name" title="${safeName}">${safeName}</span>
+          <span class="torrent-hash-sub" title="${safeHash}">${shortHash}</span>
+        </td>
+        <td><strong>${formatBytes(r.total_size || 0)}</strong></td>
+        <td>${formatBytes(r.downloaded_bytes || 0)}</td>
+        <td>${formatBytes(r.uploaded_bytes || 0)}</td>
+        <td><span class="badge-status ${statusClass}">${r.status}</span></td>
+        <td><small style="font-family: var(--font-mono);">${addedStr}</small></td>
+        <td><small style="font-family: var(--font-mono);">${endStr}</small></td>
+        <td>
+          <button class="btn btn-secondary btn-sm" onclick="viewTorrentEvents('${safeHash}', '${encodeURIComponent(safeName)}')">
+            Lifecycle Log
+          </button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function handleAnalyticsFilter() {
+  clearTimeout(analyticsFilterTimeout);
+  analyticsFilterTimeout = setTimeout(() => {
+    loadAnalyticsData();
+  }, 250);
+}
+
+async function viewTorrentEvents(infoHash, encodedName) {
+  const modal = document.getElementById('modal-events');
+  const title = document.getElementById('events-modal-title');
+  const subtitle = document.getElementById('events-modal-subtitle');
+  const timeline = document.getElementById('events-timeline');
+
+  const name = decodeURIComponent(encodedName);
+  if (title) title.textContent = `Lifecycle Log: ${name}`;
+  if (subtitle) subtitle.textContent = `Info Hash: ${infoHash}`;
+  if (timeline) timeline.innerHTML = '<p class="text-center" style="color: var(--text-muted); padding: 20px;">Loading event history...</p>';
+  modal.classList.remove('hidden');
+
+  try {
+    const res = await fetch(`/api/torrents/${infoHash}/events`);
+    if (!res.ok) throw new Error('Failed to load events');
+    const data = await res.json();
+    const events = data.events || [];
+
+    if (events.length === 0) {
+      timeline.innerHTML = '<p class="text-center" style="color: var(--text-muted); padding: 20px;">No events recorded for this torrent.</p>';
+      return;
+    }
+
+    timeline.innerHTML = events.map(ev => {
+      const timeStr = new Date(ev.timestamp * 1000).toISOString().replace('T', ' ').slice(0, 19);
+      let badgeStyle = 'background: rgba(6, 182, 212, 0.2); color: #06b6d4;';
+      if (ev.event_type === 'COMPLETED') badgeStyle = 'background: rgba(16, 185, 129, 0.2); color: #10b981;';
+      if (ev.event_type === 'ERROR') badgeStyle = 'background: rgba(239, 68, 68, 0.2); color: #ef4444;';
+      if (ev.event_type === 'REMOVED') badgeStyle = 'background: rgba(100, 116, 139, 0.2); color: #94a3b8;';
+
+      return `
+        <div class="timeline-entry">
+          <span class="timeline-type-pill" style="${badgeStyle}">${escapeHtml(ev.event_type)}</span>
+          <div class="timeline-entry-content">
+            <div class="timeline-entry-details">${escapeHtml(ev.details || '')}</div>
+            <div class="timeline-entry-time">${timeStr} UTC</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (err) {
+    if (timeline) timeline.innerHTML = `<p class="text-center" style="color: var(--accent-red); padding: 20px;">Error: ${err.message}</p>`;
+  }
+}
+
+function closeEventsModal() {
+  document.getElementById('modal-events').classList.add('hidden');
+}

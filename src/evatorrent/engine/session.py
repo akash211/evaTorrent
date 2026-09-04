@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 STALL_TIMEOUT_SECONDS = 300.0
 
 
+from evatorrent.db.database import Database
+
+
 class TorrentStatus(str, Enum):
     PENDING = "pending"
     CHECKING = "checking"
@@ -42,12 +45,14 @@ class TorrentSession:
         max_peers: int = 35,
         port: int = 6881,
         download_limit: Optional[int] = None,  # Bytes/sec, None or 0 for unlimited
+        db: Optional[Database] = None,
     ):
         self.torrent = torrent
         self.download_dir = Path(download_dir)
         self.max_peers = max_peers
         self.port = port
         self.download_limit = download_limit
+        self.db = db
 
         self.piece_manager = PieceManager(
             torrent=torrent,
@@ -73,7 +78,13 @@ class TorrentSession:
         self.eta_seconds: Optional[int] = None
         self._last_speed_check: float = time.time()
         self._last_downloaded_bytes: int = 0
+        self._last_uploaded_bytes: int = 0
         self._last_data_received_time: float = time.time()
+
+        # Check existing files on disk
+        self.piece_manager.check_existing_files()
+        if self.piece_manager.is_complete:
+            self.status = TorrentStatus.COMPLETED
 
     def touch_activity(self) -> None:
         """Records data activity from swarm to prevent stall timeout."""
@@ -114,7 +125,17 @@ class TorrentSession:
 
     def resume(self) -> None:
         if self.status == TorrentStatus.COMPLETED:
-            return
+            # If downloaded files were deleted from disk, re-verify and resume download
+            files_exist = any(
+                (self.download_dir / f.path).exists() or (self.download_dir / f"{f.path}.part").exists()
+                for f in self.torrent.files
+            )
+            if files_exist and self.piece_manager.is_complete:
+                return
+            logger.info(f"Torrent '{self.torrent.name}' files were removed from disk. Re-downloading...")
+            self.piece_manager.check_existing_files()
+            self.status = TorrentStatus.DOWNLOADING
+
         self.error_message = None
         self._last_data_received_time = time.time()
         self.start()
@@ -139,6 +160,13 @@ class TorrentSession:
         self.status = TorrentStatus.COMPLETED
         self._running = False
         logger.info(f"Torrent '{self.torrent.name}' fully downloaded. Stopping peer connections (no seeding).")
+
+        if self.db:
+            self.db.mark_torrent_completed(
+                self.torrent.info_hash_hex,
+                self.piece_manager.bytes_downloaded,
+                self.piece_manager.bytes_uploaded,
+            )
 
         # Notify tracker of completion
         try:
@@ -193,6 +221,8 @@ class TorrentSession:
                         )
                         self.status = TorrentStatus.ERROR
                         self.error_message = f"Download stalled: no data received for {int(STALL_TIMEOUT_SECONDS / 60)} minutes"
+                        if self.db:
+                            self.db.mark_torrent_error(self.torrent.info_hash_hex, self.error_message)
                         await self.stop()
                         break
 
@@ -251,22 +281,28 @@ class TorrentSession:
                 await asyncio.sleep(5.0)
 
     async def _speed_meter_loop(self) -> None:
-        """Calculates download speed and ETA every second."""
+        """Calculates download speed, upload speed, and ETA every second."""
+        tick = 0
         while self._running:
             try:
                 await asyncio.sleep(1.0)
+                tick += 1
                 now = time.time()
                 elapsed = now - self._last_speed_check
                 if elapsed <= 0:
                     continue
 
                 curr_downloaded = self.piece_manager.bytes_downloaded
-                delta = curr_downloaded - self._last_downloaded_bytes
-                if delta > 0:
+                curr_uploaded = self.piece_manager.bytes_uploaded
+                delta_dl = curr_downloaded - self._last_downloaded_bytes
+                delta_ul = curr_uploaded - self._last_uploaded_bytes
+                if delta_dl > 0:
                     self._last_data_received_time = now
 
-                self.download_speed = max(0.0, delta / elapsed)
+                self.download_speed = max(0.0, delta_dl / elapsed)
+                self.upload_speed = max(0.0, delta_ul / elapsed)
                 self._last_downloaded_bytes = curr_downloaded
+                self._last_uploaded_bytes = curr_uploaded
                 self._last_speed_check = now
 
                 # Update speed on individual peer connections
@@ -279,6 +315,15 @@ class TorrentSession:
                     self.eta_seconds = int(bytes_left / self.download_speed)
                 else:
                     self.eta_seconds = 0 if bytes_left == 0 else None
+
+                # Persist progress to DB every 5 seconds
+                if self.db and tick % 5 == 0:
+                    self.db.update_torrent_progress(
+                        self.torrent.info_hash_hex,
+                        curr_downloaded,
+                        curr_uploaded,
+                        self.status.value,
+                    )
 
             except asyncio.CancelledError:
                 break

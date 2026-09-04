@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -90,6 +91,60 @@ class PieceManager:
     def peer_has_all_pieces(self, peer_key: str) -> None:
         """Marks that a peer (e.g. an unchoking seeder) possesses all pieces."""
         self.peers[peer_key] = set(range(len(self.pieces)))
+
+    def check_existing_files(self) -> int:
+        """Verifies files on disk against torrent piece hashes to restore completed pieces or detect deletion."""
+        any_file_exists = any(
+            (self.disk_writer.output_dir / f.path).exists() or (self.disk_writer.output_dir / f"{f.path}.part").exists()
+            for f in self.torrent.files
+        )
+        if not any_file_exists:
+            self.completed_pieces.clear()
+            self.ongoing_pieces.clear()
+            self.missing_pieces = set(range(self.torrent.piece_count))
+            for p in self.pieces:
+                p.reset()
+            self.bytes_downloaded = 0
+            return 0
+
+        verified = 0
+        self.completed_pieces.clear()
+        self.ongoing_pieces.clear()
+        self.missing_pieces = set(range(self.torrent.piece_count))
+        for p in self.pieces:
+            p.reset()
+
+        for idx, piece in enumerate(self.pieces):
+            try:
+                data = self.disk_writer.read_piece(idx)
+                if len(data) == piece.length and hashlib.sha1(data).digest() == piece.expected_hash:
+                    self.completed_pieces.add(idx)
+                    self.missing_pieces.discard(idx)
+                    verified += 1
+            except Exception:
+                pass
+
+        self.bytes_downloaded = sum(self.torrent.piece_size(i) for i in self.completed_pieces)
+        return verified
+
+    def read_block(self, piece_index: int, begin: int, length: int) -> Optional[bytes]:
+        """Reads block from verified piece on disk for serving to peers (seeding)."""
+        if piece_index not in self.completed_pieces:
+            return None
+        if piece_index < 0 or piece_index >= len(self.pieces):
+            return None
+        piece = self.pieces[piece_index]
+        if begin < 0 or begin + length > piece.length:
+            return None
+
+        try:
+            full_piece = self.disk_writer.read_piece(piece_index)
+            block_data = full_piece[begin : begin + length]
+            self.bytes_uploaded += len(block_data)
+            return block_data
+        except Exception as e:
+            logger.debug(f"Failed to read block for piece {piece_index}: {e}")
+            return None
 
     def next_requests(self, peer_key: str, max_count: int = 4) -> List[Block]:
         """Pipelined block selector: returns up to max_count blocks to request from this peer."""
