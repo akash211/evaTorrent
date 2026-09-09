@@ -138,6 +138,15 @@ async def https_enforcement_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
+@app.middleware("http")
+async def no_cache_static_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/") or request.url.path in ("/", "/index.html"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8080", "http://127.0.0.1:8080"],
