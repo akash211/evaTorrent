@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional
 
 # Protocol constants
 PSTR = b"BitTorrent protocol"

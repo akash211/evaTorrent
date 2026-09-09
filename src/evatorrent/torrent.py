@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote
 
 import httpx
 from evatorrent.bencoding import bdecode, bencode

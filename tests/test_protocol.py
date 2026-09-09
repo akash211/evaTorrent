@@ -2,7 +2,6 @@ import asyncio
 import pytest
 from evatorrent.peer.protocol import (
     Bitfield,
-    Cancel,
     Choke,
     Handshake,
     Have,
@@ -10,7 +9,6 @@ from evatorrent.peer.protocol import (
     KeepAlive,
     NotInterested,
     Piece,
-    Port,
     Request,
     Unchoke,
     decode_message,

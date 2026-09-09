@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 from evatorrent.peer.protocol import (
     KeepAlive,

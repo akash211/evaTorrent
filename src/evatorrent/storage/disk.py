@@ -7,7 +7,6 @@ complete and verified, '.part' files are atomically renamed to their final filen
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 from pathlib import Path
 from typing import List

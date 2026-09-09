@@ -45,7 +45,6 @@ from evatorrent.db.database import Database
 from evatorrent.engine.manager import EngineManager
 from evatorrent.search.cache import SearchCacheManager
 from evatorrent.search.service import SearchService
-from evatorrent.torrent import Magnet, Torrent
 from evatorrent.web.ws import WebSocketManager
 
 STATIC_DIR = Path(__file__).parent / "static"

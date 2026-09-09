@@ -1,6 +1,5 @@
 import socket
 import struct
-import pytest
 from evatorrent.tracker.http import parse_compact_peers
 from evatorrent.tracker.manager import generate_peer_id, TrackerManager
 from evatorrent.tracker.http import HttpTracker

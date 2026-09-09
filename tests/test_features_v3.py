@@ -1,10 +1,8 @@
 import tempfile
-import time
 from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from evatorrent.db.database import Database
 from evatorrent.storage.manager import PieceManager
 from evatorrent.torrent import Torrent
 from evatorrent.bencoding import bencode

@@ -7,7 +7,7 @@ import logging
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, Optional, Set
 
 from evatorrent.engine.connection import PeerConnection
 from evatorrent.peer.protocol import Have

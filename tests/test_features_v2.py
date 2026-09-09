@@ -7,7 +7,6 @@ import pytest
 from evatorrent.bencoding import bencode
 from evatorrent.engine.session import TorrentSession, TorrentStatus
 from evatorrent.storage.disk import DiskWriter
-from evatorrent.storage.manager import PieceManager
 from evatorrent.torrent import Torrent
 
 

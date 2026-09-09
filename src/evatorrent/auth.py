@@ -298,7 +298,7 @@ class EmailSender:
             # Print to console/docker log only when SMTP is not configured
             print("\n" + "=" * 62, flush=True)
             print(f"  ⚡ [evaTorrent AUTH] Login OTP for {recipient_email}: {otp}", flush=True)
-            print(f"  Valid for 10 minutes (SMTP not configured).", flush=True)
+            print("  Valid for 10 minutes (SMTP not configured).", flush=True)
             print("=" * 62 + "\n", flush=True)
             logger.info("SMTP is not configured. OTP printed to server logs.")
             return True

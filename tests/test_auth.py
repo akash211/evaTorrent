@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from evatorrent.auth import AuthConfig, OTPManager, SessionManager
-from evatorrent.web.app import app, auth_config, session_manager, otp_manager
+from evatorrent.web.app import app, auth_config, otp_manager
 
 
 def test_auth_config_and_session():

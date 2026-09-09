@@ -1,11 +1,9 @@
 import hashlib
 import tempfile
 from pathlib import Path
-import pytest
 from evatorrent.bencoding import bencode
-from evatorrent.storage.disk import DiskWriter
 from evatorrent.storage.manager import PieceManager
-from evatorrent.storage.piece import Piece, BLOCK_SIZE
+from evatorrent.storage.piece import Piece
 from evatorrent.torrent import Torrent
 
 

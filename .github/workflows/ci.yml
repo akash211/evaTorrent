@@ -30,6 +30,9 @@ jobs:
       - name: Bytecode & Syntax Compilation Pre-Check
         run: uv run python -m compileall -q src
 
+      - name: Code Quality & Lint Check (Ruff)
+        run: uv run ruff check src tests
+
       - name: Run Test Suite
         run: uv run pytest -v
 

@@ -1,7 +1,6 @@
 import tempfile
 import time
 from pathlib import Path
-import pytest
 
 from evatorrent.db.database import Database
 from evatorrent.auth import OTPManager

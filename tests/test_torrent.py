@@ -1,5 +1,4 @@
 import hashlib
-import pytest
 from evatorrent.bencoding import bencode
 from evatorrent.torrent import Torrent, Magnet
 

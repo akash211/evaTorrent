@@ -10,7 +10,7 @@ import struct
 from typing import Optional
 from urllib.parse import urlparse
 
-from evatorrent.tracker import Peer, TrackerResponse
+from evatorrent.tracker import TrackerResponse
 from evatorrent.tracker.http import parse_compact_peers
 
 logger = logging.getLogger(__name__)
