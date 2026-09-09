@@ -42,6 +42,8 @@ class SearchResult:
     category: str
     provider: str
     added_date: str = ""
+    source_url: str = ""
+    torrent_url: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +57,8 @@ class SearchResult:
             "category": self.category,
             "provider": self.provider,
             "added_date": self.added_date,
+            "source_url": self.source_url,
+            "torrent_url": self.torrent_url,
         }
 
 

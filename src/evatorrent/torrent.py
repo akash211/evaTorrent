@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import math
@@ -171,23 +172,38 @@ async def fetch_torrent_from_caches(info_hash_hex: str, timeout: float = 8.0) ->
     clean_hash = info_hash_hex.strip().upper()
     cache_urls = [
         f"https://itorrents.org/torrent/{clean_hash}.torrent",
-        f"https://btcache.me/torrent/{clean_hash}",
+        f"http://itorrents.org/torrent/{clean_hash}.torrent",
         f"https://torrage.info/torrent.php?h={clean_hash}",
+        f"http://torrage.info/torrent.php?h={clean_hash}",
+        f"https://btcache.me/torrent/{clean_hash}",
         f"https://cache.torrentstorage.com/gettorrent.php?h={clean_hash}",
     ]
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
-        for url in cache_urls:
-            try:
-                resp = await client.get(url)
-                if resp.status_code == 200 and len(resp.content) > 100:
-                    decoded = bdecode(resp.content)
-                    if isinstance(decoded, dict) and b"info" in decoded:
-                        return resp.content
-            except Exception:
-                continue
+    async def _fetch_single(client: httpx.AsyncClient, url: str) -> Optional[bytes]:
+        try:
+            resp = await client.get(url)
+            if resp.status_code == 200 and len(resp.content) > 100:
+                decoded = bdecode(resp.content)
+                if isinstance(decoded, dict) and b"info" in decoded:
+                    return resp.content
+        except Exception:
+            pass
+        return None
+
+    try:
+        async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+            tasks = [asyncio.create_task(_fetch_single(client, url)) for url in cache_urls]
+            for coro in asyncio.as_completed(tasks):
+                res = await coro
+                if res is not None:
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    return res
+    except Exception:
+        pass
     return None
 

@@ -10,7 +10,7 @@ from evatorrent.search.base import (
 )
 from evatorrent.search.piratebay import PirateBaySearchProvider, build_magnet
 from evatorrent.search.service import SearchService
-from evatorrent.web.app import app, auth_config, session_manager
+from evatorrent.web.app import app, auth_config, engine_manager, session_manager
 
 
 def test_format_bytes():
@@ -269,4 +269,70 @@ async def test_api_recent_searches_endpoint():
             assert "recent_searches" in data
             assert len(data["recent_searches"]) == 1
             assert data["recent_searches"][0]["query"] == "ted lasso"
+
+
+def test_search_result_source_and_torrent_urls():
+    sr = SearchResult(
+        title="Test Movie 2025",
+        info_hash="a" * 40,
+        magnet_uri="magnet:?xt=urn:btih:" + "a" * 40,
+        size_bytes=1000,
+        size_formatted="1000 B",
+        seeders=10,
+        leechers=2,
+        category="Movies",
+        provider="The Pirate Bay",
+        source_url="https://thepiratebay.org/description.php?id=12345",
+        torrent_url="https://itorrents.org/torrent/" + "A" * 40 + ".torrent",
+    )
+    d = sr.to_dict()
+    assert d["source_url"] == "https://thepiratebay.org/description.php?id=12345"
+    assert d["torrent_url"].startswith("https://itorrents.org/torrent/")
+
+
+@pytest.mark.asyncio
+async def test_download_torrent_file_endpoint(tmp_path):
+    auth_config.set_admin_email("admin@example.com")
+    token = session_manager.create_token("admin@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    test_hash = "f" * 40
+    # Mock cache file
+    cache_dir = engine_manager.download_dir / ".torrent_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fake_torrent_bytes = b"d4:infod4:name9:test_item6:lengthi100e12:piece lengthi16e6:pieces20:12345678901234567890ee"
+    (cache_dir / f"{test_hash}.torrent").write_bytes(fake_torrent_bytes)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=headers) as client:
+        resp = await client.get(f"/api/torrents/download_file?info_hash={test_hash}&name=My_Movie")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/x-bittorrent"
+        assert 'attachment; filename="My_Movie.torrent"' in resp.headers["content-disposition"]
+        assert resp.content == fake_torrent_bytes
+
+
+@pytest.mark.asyncio
+async def test_add_torrent_via_web_url():
+    auth_config.set_admin_email("admin@example.com")
+    token = session_manager.create_token("admin@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    fake_torrent_bytes = b"d4:infod4:name9:test_item6:lengthi16e12:piece lengthi16e6:pieces20:12345678901234567890ee"
+
+    transport = ASGITransport(app=app)
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = fake_torrent_bytes
+        mock_resp.text = "fake"
+        mock_get.return_value = mock_resp
+
+        async with AsyncClient(transport=transport, base_url="http://testserver", headers=headers) as client:
+            resp = await client.post("/api/torrents/add", json={"magnet": "https://example.com/test.torrent"})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["success"] is True
+            assert data["name"] == "test_item"
+
 

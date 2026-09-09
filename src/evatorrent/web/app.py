@@ -13,7 +13,11 @@ MAX_TORRENT_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 from collections import defaultdict
 import csv
 import io
+import logging
+import re
 import time
+
+logger = logging.getLogger("evaTorrent.web")
 
 from fastapi import (
     Cookie,
@@ -45,6 +49,7 @@ from evatorrent.db.database import Database
 from evatorrent.engine.manager import EngineManager
 from evatorrent.search.cache import SearchCacheManager
 from evatorrent.search.service import SearchService
+from evatorrent.torrent import fetch_torrent_from_caches
 from evatorrent.web.ws import WebSocketManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -465,12 +470,13 @@ async def upload_torrent(
 
 @app.post("/api/torrents/magnet")
 @app.post("/api/torrents/add")
+@app.post("/api/torrents/url")
 async def add_magnet(
     req: MagnetRequest,
     _: str = Depends(get_current_user),
 ):
     try:
-        session = await engine_manager.add_magnet(req.magnet)
+        session = await engine_manager.add_torrent_or_url(req.magnet)
         return {
             "success": True,
             "info_hash": session.torrent.info_hash_hex,
@@ -480,7 +486,71 @@ async def add_magnet(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to add magnet: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to add torrent: {e}")
+
+
+@app.get("/api/torrents/download_file")
+@app.get("/api/torrents/file")
+@app.get("/api/search/download_torrent")
+async def download_torrent_file(
+    info_hash: str,
+    name: Optional[str] = None,
+    token: Optional[str] = None,
+    request: Request = None,
+    evatorrent_session: Optional[str] = Cookie(None),
+):
+    """Provides direct download of a .torrent file for a given info hash."""
+    effective_token = token or evatorrent_session
+    if not effective_token and request:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            effective_token = auth_header[7:].strip()
+
+    verified_email = session_manager.verify_token(effective_token) if effective_token else None
+    if not verified_email:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    clean_hash = info_hash.strip().lower()
+    if len(clean_hash) != 40:
+        raise HTTPException(status_code=400, detail="Invalid 40-character info hash.")
+
+    cache_dir = engine_manager.download_dir / ".torrent_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    torrent_file = cache_dir / f"{clean_hash}.torrent"
+
+    raw_bytes: Optional[bytes] = None
+    if torrent_file.exists():
+        try:
+            raw_bytes = torrent_file.read_bytes()
+        except Exception:
+            raw_bytes = None
+
+    if not raw_bytes:
+        raw_bytes = await fetch_torrent_from_caches(clean_hash)
+        if raw_bytes:
+            try:
+                torrent_file.write_bytes(raw_bytes)
+            except Exception as e:
+                logger.warning(f"Failed to cache torrent file: {e}")
+
+    if not raw_bytes:
+        raise HTTPException(
+            status_code=404,
+            detail="Metainfo file (.torrent) is not yet available in public caches. You can still download via Magnet link directly in evaTorrent.",
+        )
+
+    clean_name = re.sub(r'[/\\?%*:|"<>]+', "_", name.strip()) if name else clean_hash[:12]
+    if not clean_name.lower().endswith(".torrent"):
+        clean_name = f"{clean_name}.torrent"
+
+    return Response(
+        content=raw_bytes,
+        media_type="application/x-bittorrent",
+        headers={
+            "Content-Disposition": f'attachment; filename="{clean_name}"',
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
 
 
 @app.post("/api/torrents/{info_hash}/pause")

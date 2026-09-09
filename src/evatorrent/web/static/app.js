@@ -677,24 +677,27 @@ async function uploadFile(file) {
 
 async function submitMagnet() {
   const input = document.getElementById('magnet-input');
-  const magnetUri = input.value.trim();
-  if (!magnetUri) return;
+  const uri = input.value.trim();
+  if (!uri) return;
 
   try {
-    const res = await fetch('/api/torrents/magnet', {
+    showToast('Adding torrent / URL to evaTorrent...', 'info');
+    const res = await fetch('/api/torrents/add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ magnet: magnetUri }),
+      body: JSON.stringify({ magnet: uri }),
     });
     const result = await res.json();
-    if (res.ok) {
-      showToast(`Added: ${result.name}`, 'success');
+    if (res.ok && result.success) {
+      showToast(`Added: ${result.name || 'Torrent'}`, 'success');
       closeAddModal();
+      loadTorrents();
+      switchMainView('live');
     } else {
-      showToast(result.detail || 'Invalid magnet link', 'error');
+      showToast(result.detail || 'Failed to add torrent', 'error');
     }
   } catch (e) {
-    showToast('Failed to add magnet link', 'error');
+    showToast('Failed to add torrent: ' + e.message, 'error');
   }
 }
 
@@ -1245,6 +1248,9 @@ async function executeTorrentSearch(forceRefresh = false) {
         const dateStr = item.added_date ? ` • ${escapeHtml(item.added_date)}` : '';
         const encodedMagnet = encodeURIComponent(item.magnet_uri);
         const encodedTitle = encodeURIComponent(item.title);
+        const sourceHtml = item.source_url
+          ? `<div class="search-source-row"><span class="search-source-label">Source:</span> <a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener noreferrer" class="search-source-link">${escapeHtml(item.source_url)}</a></div>`
+          : '';
 
         return `
           <tr>
@@ -1255,6 +1261,7 @@ async function executeTorrentSearch(forceRefresh = false) {
                   <span class="cat-tag">${escapeHtml(item.category || 'General')}</span>
                   <span>${escapeHtml(item.provider || 'Indexer')}${dateStr}</span>
                 </div>
+                ${sourceHtml}
               </div>
             </td>
             <td><strong>${escapeHtml(item.size_formatted)}</strong></td>
@@ -1272,10 +1279,20 @@ async function executeTorrentSearch(forceRefresh = false) {
             </td>
             <td><span style="color: var(--text-muted); font-size: 0.8rem;">${escapeHtml(item.provider)}</span></td>
             <td style="text-align: right;">
-              <button class="btn-download-action" onclick="downloadSearchResult('${encodedMagnet}', '${encodedTitle}')" title="Add to evaTorrent and start download">
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                Download
-              </button>
+              <div class="search-actions-group">
+                <button class="btn-download-action" onclick="downloadSearchResult('${encodedMagnet}', '${encodedTitle}')" title="Add to evaTorrent and start download">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                  Download
+                </button>
+                <button class="btn-action-outline" onclick="downloadTorrentFile('${item.info_hash}', '${encodedTitle}')" title="Download .torrent file to your device">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  .torrent
+                </button>
+                <button class="btn-action-outline btn-copy-link" onclick="copyTorrentLink('${encodedMagnet}')" title="Copy Magnet link to clipboard">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  Copy Link
+                </button>
+              </div>
             </td>
           </tr>
         `;
@@ -1332,5 +1349,52 @@ async function downloadSearchResult(encodedMagnet, encodedTitle) {
     }
   } catch (err) {
     showToast('Network error adding torrent: ' + err.message, 'error');
+  }
+}
+
+async function copyTorrentLink(encodedMagnet) {
+  const magnet = decodeURIComponent(encodedMagnet);
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(magnet);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = magnet;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    showToast('Magnet link copied to clipboard!', 'success');
+  } catch (err) {
+    showToast('Failed to copy magnet link: ' + err.message, 'error');
+  }
+}
+
+async function downloadTorrentFile(infoHash, encodedTitle) {
+  const title = decodeURIComponent(encodedTitle);
+  showToast(`Retrieving .torrent for "${title}"...`, 'info');
+  try {
+    const safeName = encodeURIComponent(title);
+    const url = `/api/torrents/download_file?info_hash=${encodeURIComponent(infoHash)}&name=${safeName}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const blob = await res.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      const cleanFilename = title.replace(/[/\\?%*:|"<>]+/g, '_').trim();
+      a.download = cleanFilename.toLowerCase().endsWith('.torrent') ? cleanFilename : `${cleanFilename}.torrent`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(blobUrl);
+      document.body.removeChild(a);
+      showToast('Downloaded .torrent file', 'success');
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast(data.detail || 'Could not retrieve .torrent file from caches', 'error');
+    }
+  } catch (err) {
+    showToast('Error retrieving .torrent file: ' + err.message, 'error');
   }
 }

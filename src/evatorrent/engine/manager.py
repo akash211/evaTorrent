@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import httpx
+from evatorrent.bencoding import bdecode
 from evatorrent.db.database import Database
 from evatorrent.engine.session import TorrentSession
 from evatorrent.torrent import Magnet, Torrent, fetch_torrent_from_caches
@@ -100,6 +103,60 @@ class EngineManager:
                 torrent.trackers.append(tr)
 
         return self.add_torrent(torrent, output_dir)
+
+    async def add_url(self, url: str, output_dir: Optional[Path] = None) -> TorrentSession:
+        """Downloads a .torrent file from an HTTP/HTTPS URL and enrolls it."""
+        clean_url = url.strip()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        }
+        try:
+            async with httpx.AsyncClient(headers=headers, timeout=15.0, follow_redirects=True) as client:
+                resp = await client.get(clean_url)
+                if resp.status_code != 200:
+                    raise ValueError(f"HTTP request to torrent URL failed with status {resp.status_code}")
+
+                content = resp.content
+                # Check if it is a valid bencoded torrent
+                is_bencoded = False
+                try:
+                    decoded = bdecode(content)
+                    if isinstance(decoded, dict) and b"info" in decoded:
+                        is_bencoded = True
+                except Exception:
+                    is_bencoded = False
+
+                if is_bencoded:
+                    return self.add_torrent_bytes(content, output_dir)
+
+                # If not direct torrent bytes, check if response text contains a magnet link
+                text = resp.text
+                magnet_match = re.search(r'magnet:\?[^"\'\s<>]+', text)
+                if magnet_match:
+                    return await self.add_magnet(magnet_match.group(0), output_dir)
+
+                raise ValueError("URL did not return a valid .torrent file or magnet link.")
+        except Exception as e:
+            if isinstance(e, ValueError):
+                raise
+            raise ValueError(f"Failed to fetch torrent from URL: {e}")
+
+    async def add_torrent_or_url(self, input_str: str, output_dir: Optional[Path] = None) -> TorrentSession:
+        """Accepts a magnet link, HTTP/HTTPS URL, or file path and enrolls it."""
+        s = input_str.strip()
+        if s.startswith("magnet:?"):
+            return await self.add_magnet(s, output_dir)
+        elif s.startswith("http://") or s.startswith("https://"):
+            return await self.add_url(s, output_dir)
+        elif len(s) == 40 and all(c in "0123456789abcdefABCDEF" for c in s):
+            return await self.add_magnet(f"magnet:?xt=urn:btih:{s}", output_dir)
+        else:
+            path = Path(s)
+            if path.is_file():
+                return self.add_torrent_file(path, output_dir)
+            raise ValueError(
+                "Input must be a valid magnet link (magnet:?), Web URL (http/https), or .torrent file path."
+            )
 
     def get_session(self, info_hash_hex: str) -> Optional[TorrentSession]:
         return self.sessions.get(info_hash_hex.lower())

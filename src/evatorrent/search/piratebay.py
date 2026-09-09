@@ -135,6 +135,8 @@ class PirateBaySearchProvider(BaseSearchProvider):
                         pass
 
                     magnet = build_magnet(info_hash, name)
+                    source_link = f"https://thepiratebay.org/description.php?id={item_id}" if item_id and item_id != "0" else f"https://apibay.org/q.php?q={urllib.parse.quote(name)}"
+                    direct_torrent_link = f"https://itorrents.org/torrent/{info_hash.upper()}.torrent"
 
                     results.append(
                         SearchResult(
@@ -148,6 +150,8 @@ class PirateBaySearchProvider(BaseSearchProvider):
                             category=cat_display,
                             provider=self.name,
                             added_date=added_str,
+                            source_url=source_link,
+                            torrent_url=direct_torrent_link,
                         )
                     )
 
