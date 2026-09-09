@@ -95,3 +95,4 @@ async def test_web_endpoints():
             assert resp.status_code == 200
             assert resp.json()["success"] is True
 
+

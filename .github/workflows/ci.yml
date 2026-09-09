@@ -27,6 +27,9 @@ jobs:
       - name: Install Dependencies
         run: uv sync --all-extras --dev
 
+      - name: Bytecode & Syntax Compilation Pre-Check
+        run: uv run python -m compileall -q src
+
       - name: Run Test Suite
         run: uv run pytest -v
 

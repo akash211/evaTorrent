@@ -69,7 +69,7 @@ def cmd_download(args):
     asyncio.run(run_download(args.torrent, args.output))
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="evatorrent",
         description="evaTorrent ⚡ - High-performance modern BitTorrent engine and Web UI",
@@ -91,7 +91,11 @@ def main():
         default=os.environ.get("DOWNLOAD_DIR", "downloads"),
         help="Output directory (default: DOWNLOAD_DIR env or 'downloads')",
     )
+    return parser
 
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     if args.command == "web":
         cmd_web(args)
@@ -100,6 +104,7 @@ def main():
     else:
         # Default to starting the web UI
         parser.print_help()
+
 
 
 if __name__ == "__main__":
