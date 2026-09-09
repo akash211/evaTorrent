@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -84,7 +85,12 @@ def main():
     # CLI download command
     dl_parser = subparsers.add_parser("download", help="Download a .torrent directly in CLI")
     dl_parser.add_argument("torrent", help="Path to .torrent file")
-    dl_parser.add_argument("-o", "--output", default="downloads", help="Output directory (default: downloads)")
+    dl_parser.add_argument(
+        "-o",
+        "--output",
+        default=os.environ.get("DOWNLOAD_DIR", "downloads"),
+        help="Output directory (default: DOWNLOAD_DIR env or 'downloads')",
+    )
 
     args = parser.parse_args()
     if args.command == "web":

@@ -78,3 +78,14 @@ async def test_web_endpoints():
         # 9. Delete
         resp = await client.delete(f"/api/torrents/{info_hash}")
         assert resp.status_code == 200
+
+        # 10. Magnet and /api/torrents/add endpoint
+        fake_magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Ubuntu"
+        resp = await client.post("/api/torrents/magnet", json={"magnet": fake_magnet})
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+
+        resp = await client.post("/api/torrents/add", json={"magnet": fake_magnet})
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+

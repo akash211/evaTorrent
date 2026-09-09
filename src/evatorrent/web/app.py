@@ -53,7 +53,11 @@ db_path = auth_config.data_dir / "eva.db"
 database = Database(db_path)
 
 # Global managers
-engine_manager = EngineManager(db=database)
+download_dir_env = os.environ.get("DOWNLOAD_DIR")
+engine_manager = EngineManager(
+    default_download_dir=Path(download_dir_env) if download_dir_env else None,
+    db=database,
+)
 ws_manager = WebSocketManager()
 session_manager = SessionManager(auth_config)
 otp_manager = OTPManager(db=database)
@@ -458,6 +462,7 @@ async def upload_torrent(
 
 
 @app.post("/api/torrents/magnet")
+@app.post("/api/torrents/add")
 async def add_magnet(
     req: MagnetRequest,
     _: str = Depends(get_current_user),

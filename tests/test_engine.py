@@ -81,3 +81,12 @@ async def test_engine_manager():
         assert len(manager.sessions) == 0
 
         await manager.shutdown()
+
+
+def test_engine_manager_download_dir_env(monkeypatch, tmp_path):
+    custom_dir = tmp_path / "custom_downloads"
+    monkeypatch.setenv("DOWNLOAD_DIR", str(custom_dir))
+    manager = EngineManager()
+    assert manager.download_dir == custom_dir
+    assert custom_dir.exists()
+

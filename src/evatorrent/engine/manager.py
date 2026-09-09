@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -13,12 +14,20 @@ from evatorrent.torrent import Torrent
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_DOWNLOAD_DIR = Path(
+    os.environ.get("DOWNLOAD_DIR") or (Path.home() / "Downloads" / "evaTorrent")
+)
+
 
 class EngineManager:
     """Manages all active BitTorrent sessions in the evaTorrent engine."""
 
     def __init__(self, default_download_dir: Optional[Path] = None, db: Optional[Database] = None):
-        self.download_dir = Path(default_download_dir or Path.home() / "Downloads" / "evaTorrent")
+        self.download_dir = Path(
+            default_download_dir
+            or os.environ.get("DOWNLOAD_DIR")
+            or DEFAULT_DOWNLOAD_DIR
+        )
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: Dict[str, TorrentSession] = {}
         self.db = db
