@@ -121,6 +121,7 @@ async def telemetry_loop():
             pass
 
 
+app = FastAPI(title="evaTorrent API", version="0.3.0", lifespan=lifespan)
 app = FastAPI(title="evaTorrent API", version="0.4.0", lifespan=lifespan)
 
 @app.middleware("http")

@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import AsyncMock, patch
 from unittest.mock import AsyncMock, MagicMock, patch
 from httpx import ASGITransport, AsyncClient
 
@@ -63,6 +64,7 @@ async def test_piratebay_provider_parsing():
 
     provider = PirateBaySearchProvider()
     with patch("httpx.AsyncClient.get") as mock_get:
+        mock_resp = AsyncMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = fake_json

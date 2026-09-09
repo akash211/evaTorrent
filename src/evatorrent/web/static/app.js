@@ -757,6 +757,16 @@ function switchMainView(view) {
   const paneSearch = document.getElementById('view-pane-search');
   const paneAnalytics = document.getElementById('view-pane-analytics');
 
+  if (view === 'live') {
+    btnLive.classList.add('active');
+    btnAnalytics.classList.remove('active');
+    paneLive.classList.remove('hidden');
+    paneAnalytics.classList.add('hidden');
+  } else {
+    btnLive.classList.remove('active');
+    btnAnalytics.classList.add('active');
+    paneLive.classList.add('hidden');
+    paneAnalytics.classList.remove('hidden');
   if (btnLive) btnLive.classList.toggle('active', view === 'live');
   if (btnSearch) btnSearch.classList.toggle('active', view === 'search');
   if (btnAnalytics) btnAnalytics.classList.toggle('active', view === 'analytics');
