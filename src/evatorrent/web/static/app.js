@@ -983,6 +983,31 @@ function handleSearchSubmit(event) {
   executeTorrentSearch();
 }
 
+let activeSearchController = null;
+let searchTimerInterval = null;
+
+function cancelActiveSearch() {
+  if (activeSearchController) {
+    activeSearchController.abort();
+    activeSearchController = null;
+  }
+  if (searchTimerInterval) {
+    clearInterval(searchTimerInterval);
+    searchTimerInterval = null;
+  }
+  document.getElementById('search-progress-box')?.classList.add('hidden');
+  showToast('Search canceled', 'info');
+}
+
+function applySuggestionSearch() {
+  const suggested = document.getElementById('search-suggested-query')?.textContent;
+  if (suggested) {
+    const input = document.getElementById('indexer-search-query');
+    if (input) input.value = suggested;
+    executeTorrentSearch();
+  }
+}
+
 async function executeTorrentSearch() {
   const input = document.getElementById('indexer-search-query');
   const query = input?.value.trim() || '';
@@ -992,10 +1017,22 @@ async function executeTorrentSearch() {
     return;
   }
 
+  // Cancel any ongoing search before starting a new one
+  if (activeSearchController) {
+    activeSearchController.abort();
+  }
+  activeSearchController = new AbortController();
+
   lastSearchQuery = query;
   const activeOnly = document.getElementById('search-active-only')?.checked !== false;
+  const timeoutSec = parseFloat(document.getElementById('search-timeout-select')?.value || '30');
 
-  const loadingEl = document.getElementById('search-loading');
+  const progressBox = document.getElementById('search-progress-box');
+  const progressFill = document.getElementById('search-progress-fill');
+  const percentLabel = document.getElementById('search-percent-label');
+  const stageLabel = document.getElementById('search-stage-label');
+  const timerLabel = document.getElementById('search-timer-label');
+  const suggestionBox = document.getElementById('search-suggestion-box');
   const emptyEl = document.getElementById('search-empty-state');
   const resultsContainer = document.getElementById('search-results-container');
   const statusBar = document.getElementById('search-status-bar');
@@ -1003,20 +1040,56 @@ async function executeTorrentSearch() {
   const fallbackBadge = document.getElementById('search-fallback-badge');
   const tbody = document.getElementById('search-results-body');
 
-  loadingEl?.classList.remove('hidden');
-  emptyEl?.classList.add('hidden');
+  // Reset UI states
   resultsContainer?.classList.add('hidden');
+  emptyEl?.classList.add('hidden');
   statusBar?.classList.add('hidden');
   fallbackBadge?.classList.add('hidden');
+  suggestionBox?.classList.add('hidden');
+
+  // Start animated progress and timer
+  progressBox?.classList.remove('hidden');
+  if (progressFill) progressFill.style.width = '10%';
+  if (percentLabel) percentLabel.textContent = '10%';
+  if (stageLabel) stageLabel.textContent = 'Connecting to indexer swarms...';
+
+  const startTime = Date.now();
+  if (searchTimerInterval) clearInterval(searchTimerInterval);
+
+  searchTimerInterval = setInterval(() => {
+    const elapsed = (Date.now() - startTime) / 1000;
+    if (timerLabel) timerLabel.textContent = `${elapsed.toFixed(1)}s elapsed`;
+
+    // Dynamic simulated percentage curve based on timeout
+    const fraction = Math.min(0.92, elapsed / Math.max(3.0, timeoutSec * 0.4));
+    const pct = Math.min(92, Math.floor(15 + fraction * 77));
+
+    if (progressFill) progressFill.style.width = `${pct}%`;
+    if (percentLabel) percentLabel.textContent = `${pct}%`;
+
+    if (pct < 35 && stageLabel) {
+      stageLabel.textContent = 'Connecting to indexer swarms...';
+    } else if (pct < 65 && stageLabel) {
+      stageLabel.textContent = 'Querying torrent indexers & metadata...';
+    } else if (pct < 85 && stageLabel) {
+      stageLabel.textContent = 'Filtering active seeders & health...';
+    } else if (stageLabel) {
+      stageLabel.textContent = 'Formatting & verifying torrent links...';
+    }
+  }, 100);
 
   try {
     const params = new URLSearchParams({
       q: query,
       category: currentSearchCategory,
       hide_dead: activeOnly ? 'true' : 'false',
+      timeout: timeoutSec.toString(),
     });
 
-    const res = await fetch(`/api/search?${params.toString()}`);
+    const res = await fetch(`/api/search?${params.toString()}`, {
+      signal: activeSearchController.signal,
+    });
+
     if (!res.ok) {
       if (res.status === 401) {
         checkAuth();
@@ -1027,10 +1100,30 @@ async function executeTorrentSearch() {
     }
 
     const data = await res.json();
-    loadingEl?.classList.add('hidden');
+    const elapsedTotal = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    // Complete progress bar
+    if (searchTimerInterval) clearInterval(searchTimerInterval);
+    if (progressFill) progressFill.style.width = '100%';
+    if (percentLabel) percentLabel.textContent = '100%';
+    if (stageLabel) stageLabel.textContent = `Completed in ${elapsedTotal}s`;
+    setTimeout(() => {
+      progressBox?.classList.add('hidden');
+    }, 400);
 
     const results = data.results || [];
+
+    // Check if a spelling/keyword suggestion was used
+    if (data.suggestion && data.suggestion.toLowerCase() !== query.toLowerCase()) {
+      const suggestedEl = document.getElementById('search-suggested-query');
+      const originalEl = document.getElementById('search-original-query');
+      if (suggestedEl) suggestedEl.textContent = data.suggestion;
+      if (originalEl) originalEl.textContent = query;
+      suggestionBox?.classList.remove('hidden');
+    }
+
     if (results.length === 0) {
+      resultsContainer?.classList.add('hidden');
       if (emptyEl) {
         emptyEl.innerHTML = `
           <div class="empty-icon">
@@ -1039,21 +1132,29 @@ async function executeTorrentSearch() {
             </svg>
           </div>
           <h3>No torrents found for "${escapeHtml(query)}"</h3>
-          <p>Try different keywords or switch the category filter to "All".</p>
+          <p>Try different keywords, check your spelling, or switch the category filter to "All".</p>
         `;
         emptyEl.classList.remove('hidden');
       }
+      if (statusText) {
+        statusText.textContent = `Found 0 results in ${elapsedTotal}s`;
+      }
+      statusBar?.classList.remove('hidden');
       return;
     }
 
-    // Render results
+    // Results found: hide empty state and show results table
+    emptyEl?.classList.add('hidden');
+
     if (statusText) {
-      statusText.textContent = `Found ${data.total_found} torrents (showing ${results.length})`;
+      statusText.textContent = `Found ${data.total_found} torrents (showing ${results.length}) in ${elapsedTotal}s`;
     }
     statusBar?.classList.remove('hidden');
 
     if (data.fallback_applied && fallbackBadge) {
       fallbackBadge.classList.remove('hidden');
+    } else {
+      fallbackBadge?.classList.add('hidden');
     }
 
     if (tbody) {
@@ -1101,8 +1202,15 @@ async function executeTorrentSearch() {
 
     resultsContainer?.classList.remove('hidden');
   } catch (err) {
-    loadingEl?.classList.add('hidden');
+    if (searchTimerInterval) clearInterval(searchTimerInterval);
+    progressBox?.classList.add('hidden');
+
+    if (err.name === 'AbortError') {
+      return;
+    }
+
     showToast(err.message || 'Error occurred while searching', 'error');
+    resultsContainer?.classList.add('hidden');
     if (emptyEl) {
       emptyEl.innerHTML = `
         <div class="empty-icon" style="color: var(--accent-danger);">
@@ -1115,6 +1223,8 @@ async function executeTorrentSearch() {
       `;
       emptyEl.classList.remove('hidden');
     }
+  } finally {
+    activeSearchController = null;
   }
 }
 

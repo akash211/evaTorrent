@@ -64,7 +64,12 @@ class PirateBaySearchProvider(BaseSearchProvider):
     def __init__(self, timeout: float = 8.0):
         self.timeout = timeout
 
-    async def search(self, query: str, category: SearchCategory = SearchCategory.ALL) -> list[SearchResult]:
+    async def search(
+        self,
+        query: str,
+        category: SearchCategory = SearchCategory.ALL,
+        timeout: float | None = None,
+    ) -> list[SearchResult]:
         q = query.strip()
         if not q:
             return []
@@ -75,9 +80,10 @@ class PirateBaySearchProvider(BaseSearchProvider):
             "User-Agent": "evaTorrent/0.4.0 (Autonomous BitTorrent Client; https://github.com/akash211/evaTorrent)",
             "Accept": "application/json",
         }
+        effective_timeout = float(timeout) if timeout is not None and timeout > 0 else self.timeout
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=effective_timeout, follow_redirects=True) as client:
                 resp = await client.get(self.API_URL, params=params, headers=headers)
                 if resp.status_code != 200:
                     logger.warning(f"Apibay responded with HTTP {resp.status_code}")

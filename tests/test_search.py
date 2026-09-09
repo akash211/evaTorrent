@@ -89,7 +89,7 @@ async def test_search_service_ranking_and_fallback():
         def __init__(self, results):
             self._results = results
 
-        async def search(self, query, category=SearchCategory.ALL):
+        async def search(self, query, category=SearchCategory.ALL, timeout=None):
             return self._results
 
     # Case 1: Active seeds available
@@ -113,6 +113,25 @@ async def test_search_service_ranking_and_fallback():
     assert res_fallback["returned"] == 1
     assert res_fallback["fallback_applied"] is True
     assert res_fallback["results"][0]["info_hash"] == "c" * 40
+
+
+@pytest.mark.asyncio
+async def test_search_service_spelling_variation():
+    class DynamicMockProvider(BaseSearchProvider):
+        name = "DynamicMock"
+
+        async def search(self, query, category=SearchCategory.ALL, timeout=None):
+            if "traveler" in query:
+                return [
+                    SearchResult("The Time Traveler's Wife", "e" * 40, "mag:e", 500, "500 MB", 25, 2, "Movies", "Mock")
+                ]
+            return []
+
+    service = SearchService(providers=[DynamicMockProvider()])
+    res = await service.search("time travellers wife")
+    assert res["total_found"] == 1
+    assert res["suggestion"] == "time travelers wife"
+    assert res["results"][0]["title"] == "The Time Traveler's Wife"
 
 
 @pytest.mark.asyncio

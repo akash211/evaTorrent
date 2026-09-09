@@ -64,6 +64,11 @@ class BaseSearchProvider(ABC):
     name: str = "base"
 
     @abstractmethod
-    async def search(self, query: str, category: SearchCategory = SearchCategory.ALL) -> list[SearchResult]:
+    async def search(
+        self,
+        query: str,
+        category: SearchCategory = SearchCategory.ALL,
+        timeout: float | None = None,
+    ) -> list[SearchResult]:
         """Performs search on provider and returns list of SearchResult objects."""
         pass

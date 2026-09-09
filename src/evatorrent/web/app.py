@@ -587,6 +587,7 @@ async def search_torrents(
     category: str = Query("all", description="Category: all, movies, series, software, games, books"),
     hide_dead: bool = Query(True, description="Filter for torrents with active seeds (with auto fallback)"),
     limit: int = Query(100, ge=1, le=200),
+    timeout: float = Query(30.0, ge=5.0, le=300.0, description="Max search timeout in seconds"),
     _: str = Depends(get_current_user),
 ):
     """Searches external torrent indexers cleanly with no ads and returns ranked results."""
@@ -596,6 +597,7 @@ async def search_torrents(
             category=category,
             hide_dead=hide_dead,
             limit=limit,
+            timeout=timeout,
         )
         return results
     except Exception as e:
