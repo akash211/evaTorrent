@@ -42,6 +42,7 @@ from evatorrent.auth import (
 )
 from evatorrent.db.database import Database
 from evatorrent.engine.manager import EngineManager
+from evatorrent.search.service import SearchService
 from evatorrent.torrent import Magnet, Torrent
 from evatorrent.web.ws import WebSocketManager
 
@@ -58,6 +59,7 @@ session_manager = SessionManager(auth_config)
 otp_manager = OTPManager(db=database)
 email_sender = EmailSender(auth_config)
 google_verifier = GoogleVerifier(auth_config)
+search_service = SearchService()
 
 # In-memory IP rate limiter: client_ip -> list of timestamps
 _ip_rate_limits: dict[str, list[float]] = defaultdict(list)
@@ -119,7 +121,7 @@ async def telemetry_loop():
             pass
 
 
-app = FastAPI(title="evaTorrent API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="evaTorrent API", version="0.4.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def https_enforcement_middleware(request: Request, call_next):
@@ -566,6 +568,28 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
         ws_manager.disconnect(websocket)
     except Exception:
         ws_manager.disconnect(websocket)
+
+
+
+@app.get("/api/search")
+async def search_torrents(
+    q: str = Query(..., min_length=1, description="Search query string"),
+    category: str = Query("all", description="Category: all, movies, series, software, games, books"),
+    hide_dead: bool = Query(True, description="Filter for torrents with active seeds (with auto fallback)"),
+    limit: int = Query(100, ge=1, le=200),
+    _: str = Depends(get_current_user),
+):
+    """Searches external torrent indexers cleanly with no ads and returns ranked results."""
+    try:
+        results = await search_service.search(
+            query=q,
+            category=category,
+            hide_dead=hide_dead,
+            limit=limit,
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
 
 
 # Mount static files

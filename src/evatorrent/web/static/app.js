@@ -751,21 +751,24 @@ let currentMainView = 'live';
 function switchMainView(view) {
   currentMainView = view;
   const btnLive = document.getElementById('nav-btn-live');
+  const btnSearch = document.getElementById('nav-btn-search');
   const btnAnalytics = document.getElementById('nav-btn-analytics');
   const paneLive = document.getElementById('view-pane-live');
+  const paneSearch = document.getElementById('view-pane-search');
   const paneAnalytics = document.getElementById('view-pane-analytics');
 
-  if (view === 'live') {
-    btnLive.classList.add('active');
-    btnAnalytics.classList.remove('active');
-    paneLive.classList.remove('hidden');
-    paneAnalytics.classList.add('hidden');
-  } else {
-    btnLive.classList.remove('active');
-    btnAnalytics.classList.add('active');
-    paneLive.classList.add('hidden');
-    paneAnalytics.classList.remove('hidden');
+  if (btnLive) btnLive.classList.toggle('active', view === 'live');
+  if (btnSearch) btnSearch.classList.toggle('active', view === 'search');
+  if (btnAnalytics) btnAnalytics.classList.toggle('active', view === 'analytics');
+
+  if (paneLive) paneLive.classList.toggle('hidden', view !== 'live');
+  if (paneSearch) paneSearch.classList.toggle('hidden', view !== 'search');
+  if (paneAnalytics) paneAnalytics.classList.toggle('hidden', view !== 'analytics');
+
+  if (view === 'analytics') {
     loadAnalyticsData();
+  } else if (view === 'search') {
+    setTimeout(() => document.getElementById('indexer-search-query')?.focus(), 50);
   }
 }
 
@@ -940,4 +943,192 @@ async function viewTorrentEvents(infoHash, encodedName) {
 
 function closeEventsModal() {
   document.getElementById('modal-events').classList.add('hidden');
+}
+
+// --- Torrent Search & Aggregator Engine ---
+
+let currentSearchCategory = 'all';
+let lastSearchQuery = '';
+
+function selectSearchCategory(category) {
+  currentSearchCategory = category;
+  document.querySelectorAll('.cat-pill').forEach(pill => {
+    pill.classList.toggle('active', pill.dataset.cat === category);
+  });
+  const query = document.getElementById('indexer-search-query')?.value.trim();
+  if (query) {
+    executeTorrentSearch();
+  }
+}
+
+function triggerSearchFilterChange() {
+  const query = document.getElementById('indexer-search-query')?.value.trim();
+  if (query) {
+    executeTorrentSearch();
+  }
+}
+
+function handleSearchSubmit(event) {
+  if (event) event.preventDefault();
+  executeTorrentSearch();
+}
+
+async function executeTorrentSearch() {
+  const input = document.getElementById('indexer-search-query');
+  const query = input?.value.trim() || '';
+  if (!query) {
+    showToast('Please enter a search query', 'info');
+    input?.focus();
+    return;
+  }
+
+  lastSearchQuery = query;
+  const activeOnly = document.getElementById('search-active-only')?.checked !== false;
+
+  const loadingEl = document.getElementById('search-loading');
+  const emptyEl = document.getElementById('search-empty-state');
+  const resultsContainer = document.getElementById('search-results-container');
+  const statusBar = document.getElementById('search-status-bar');
+  const statusText = document.getElementById('search-status-text');
+  const fallbackBadge = document.getElementById('search-fallback-badge');
+  const tbody = document.getElementById('search-results-body');
+
+  loadingEl?.classList.remove('hidden');
+  emptyEl?.classList.add('hidden');
+  resultsContainer?.classList.add('hidden');
+  statusBar?.classList.add('hidden');
+  fallbackBadge?.classList.add('hidden');
+
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      category: currentSearchCategory,
+      hide_dead: activeOnly ? 'true' : 'false',
+    });
+
+    const res = await fetch(`/api/search?${params.toString()}`);
+    if (!res.ok) {
+      if (res.status === 401) {
+        checkAuth();
+        return;
+      }
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Search request failed');
+    }
+
+    const data = await res.json();
+    loadingEl?.classList.add('hidden');
+
+    const results = data.results || [];
+    if (results.length === 0) {
+      if (emptyEl) {
+        emptyEl.innerHTML = `
+          <div class="empty-icon">
+            <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </div>
+          <h3>No torrents found for "${escapeHtml(query)}"</h3>
+          <p>Try different keywords or switch the category filter to "All".</p>
+        `;
+        emptyEl.classList.remove('hidden');
+      }
+      return;
+    }
+
+    // Render results
+    if (statusText) {
+      statusText.textContent = `Found ${data.total_found} torrents (showing ${results.length})`;
+    }
+    statusBar?.classList.remove('hidden');
+
+    if (data.fallback_applied && fallbackBadge) {
+      fallbackBadge.classList.remove('hidden');
+    }
+
+    if (tbody) {
+      tbody.innerHTML = results.map(item => {
+        const seedersClass = item.seeders > 0 ? 'badge-seeders' : 'badge-seeders badge-zero-seeds';
+        const dateStr = item.added_date ? ` • ${escapeHtml(item.added_date)}` : '';
+        const encodedMagnet = encodeURIComponent(item.magnet_uri);
+        const encodedTitle = encodeURIComponent(item.title);
+
+        return `
+          <tr>
+            <td>
+              <div class="search-title-cell">
+                <span class="search-title-text" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</span>
+                <div class="search-meta-row">
+                  <span class="cat-tag">${escapeHtml(item.category || 'General')}</span>
+                  <span>${escapeHtml(item.provider || 'Indexer')}${dateStr}</span>
+                </div>
+              </div>
+            </td>
+            <td><strong>${escapeHtml(item.size_formatted)}</strong></td>
+            <td>
+              <span class="${seedersClass}">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"/></svg>
+                ${item.seeders}
+              </span>
+            </td>
+            <td>
+              <span class="badge-leechers">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+                ${item.leechers}
+              </span>
+            </td>
+            <td><span style="color: var(--text-muted); font-size: 0.8rem;">${escapeHtml(item.provider)}</span></td>
+            <td style="text-align: right;">
+              <button class="btn-download-action" onclick="downloadSearchResult('${encodedMagnet}', '${encodedTitle}')" title="Add to evaTorrent and start download">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                Download
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    resultsContainer?.classList.remove('hidden');
+  } catch (err) {
+    loadingEl?.classList.add('hidden');
+    showToast(err.message || 'Error occurred while searching', 'error');
+    if (emptyEl) {
+      emptyEl.innerHTML = `
+        <div class="empty-icon" style="color: var(--accent-danger);">
+          <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+        </div>
+        <h3>Search Error</h3>
+        <p>${escapeHtml(err.message || 'Could not query torrent indexers.')}</p>
+      `;
+      emptyEl.classList.remove('hidden');
+    }
+  }
+}
+
+async function downloadSearchResult(encodedMagnet, encodedTitle) {
+  const magnet = decodeURIComponent(encodedMagnet);
+  const title = decodeURIComponent(encodedTitle);
+
+  try {
+    showToast(`Adding "${title}" to evaTorrent...`, 'info');
+    const res = await fetch('/api/torrents/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ magnet: magnet }),
+    });
+
+    const result = await res.json();
+    if (res.ok && result.success) {
+      showToast(`Started download: ${result.name || title}`, 'success');
+      // Switch immediately to Live Swarm view so user sees it in action
+      switchMainView('live');
+    } else {
+      showToast(result.detail || 'Failed to add torrent', 'error');
+    }
+  } catch (err) {
+    showToast('Network error adding torrent: ' + err.message, 'error');
+  }
 }

@@ -8,12 +8,17 @@ evaTorrent is an asynchronous BitTorrent client implementing core BitTorrent spe
 
 ## Features
 
-- 📊 **Swarm Analytics & Persistent History (New)**:
+- 🔍 **Ad-Free Torrent Search & Aggregator (New in v0.4.0)**:
+  - **Multi-Category Aggregation**: Instant searches across **Movies**, **TV Series**, **Games**, **Software**, and **Books** directly from the UI.
+  - **100% Ad-Free**: Bypasses all indexer popups, banners, and malicious scripts by querying machine-readable APIs server-side.
+  - **Health & Seed Prioritization**: Automatically sorts by active seeders with smart fallback to ensure results are always returned.
+  - **1-Click Download**: Single click instantly sends the magnet URI to evaTorrent's engine and switches to the **Live Swarm** tab.
+- 📊 **Swarm Analytics & Persistent History**:
   - **SQLite Lifetime Persistence (`eva.db`)**: Stores all torrent lifecycle events and metrics permanently, even after torrent removal or failure.
   - **Swarm Analytics Dashboard**: Filter historical records by status (completed, active, paused, errored, removed), search by name or hash, and view KPI aggregates.
   - **CSV Export**: Instant one-click export of complete historical download/upload logs to `.csv`.
   - **Lifecycle Audit Trail**: Drill into any historical torrent to view detailed timestamps for addition, pauses, resumes, errors, completion, and removal.
-- 🔐 **Authentication & Security (New in v0.3.0)**:
+- 🔐 **Authentication & Security**:
   - **Email OTP Sign-In**: Passwordless login with 6-digit cryptographic verification codes sent via SMTP or printed to server/docker logs.
   - **Google OAuth Login**: Direct one-click login via Google Identity Services (GIS) for authorized administrators.
   - **Initial Setup Wizard**: Easily configure your administrator email on first launch or directly via environment variables.
@@ -29,7 +34,7 @@ evaTorrent is an asynchronous BitTorrent client implementing core BitTorrent spe
 - 📦 **Managed with `uv` & Docker Ready**: Single-command runner, official Docker Hub image, and `docker-compose.yml`.
 - 🌐 **Modern Web UI**:
   - Dark mode dashboard with glassmorphism and real-time animations.
-  - Dual tabs: **Live Swarm** and **Swarm Analytics 📊**.
+  - Triple tabs: **Live Swarm**, **Torrent Search 🔍**, and **Swarm Analytics 📊**.
   - Live WebSocket telemetry (download/upload speed gauges, active peers, progress).
   - Interactive **Piece Map Visualizer** displaying real-time piece completion and in-flight blocks.
   - Peer Inspector showing swarm connection states, unchoked flags, and peer transfer speeds.
@@ -48,7 +53,7 @@ Create or use the included `docker-compose.yml`:
 ```yaml
 services:
   evatorrent:
-    image: akashkece/evatorrent:0.3.0
+    image: akashkece/evatorrent:0.4.0
     container_name: evatorrent
     restart: unless-stopped
     ports:
