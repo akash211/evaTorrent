@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from evatorrent.search.base import SearchCategory, SearchResult
+from evatorrent.search.cache import SearchCacheManager
 from evatorrent.search.service import SearchService
 
-__all__ = ["SearchCategory", "SearchResult", "SearchService"]
+__all__ = ["SearchCategory", "SearchResult", "SearchService", "SearchCacheManager"]
+

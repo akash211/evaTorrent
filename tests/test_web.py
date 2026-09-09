@@ -81,11 +81,17 @@ async def test_web_endpoints():
 
         # 10. Magnet and /api/torrents/add endpoint
         fake_magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Ubuntu"
-        resp = await client.post("/api/torrents/magnet", json={"magnet": fake_magnet})
-        assert resp.status_code == 200
-        assert resp.json()["success"] is True
+        from unittest.mock import AsyncMock, MagicMock, patch
+        mock_sess = MagicMock()
+        mock_sess.torrent.info_hash_hex = "0123456789abcdef0123456789abcdef01234567"
+        mock_sess.torrent.name = "Ubuntu"
+        with patch("evatorrent.web.app.engine_manager.add_magnet", new_callable=AsyncMock) as mock_add:
+            mock_add.return_value = mock_sess
+            resp = await client.post("/api/torrents/magnet", json={"magnet": fake_magnet})
+            assert resp.status_code == 200
+            assert resp.json()["success"] is True
 
-        resp = await client.post("/api/torrents/add", json={"magnet": fake_magnet})
-        assert resp.status_code == 200
-        assert resp.json()["success"] is True
+            resp = await client.post("/api/torrents/add", json={"magnet": fake_magnet})
+            assert resp.status_code == 200
+            assert resp.json()["success"] is True
 

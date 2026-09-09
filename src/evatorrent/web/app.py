@@ -43,6 +43,7 @@ from evatorrent.auth import (
 )
 from evatorrent.db.database import Database
 from evatorrent.engine.manager import EngineManager
+from evatorrent.search.cache import SearchCacheManager
 from evatorrent.search.service import SearchService
 from evatorrent.torrent import Magnet, Torrent
 from evatorrent.web.ws import WebSocketManager
@@ -59,12 +60,14 @@ engine_manager = EngineManager(
     default_download_dir=Path(download_dir_env) if download_dir_env else None,
     db=database,
 )
+search_cache_dir = engine_manager.download_dir / "cached_results"
+search_cache_manager = SearchCacheManager(cache_dir=search_cache_dir, max_cached=100)
 ws_manager = WebSocketManager()
 session_manager = SessionManager(auth_config)
 otp_manager = OTPManager(db=database)
 email_sender = EmailSender(auth_config)
 google_verifier = GoogleVerifier(auth_config)
-search_service = SearchService()
+search_service = SearchService(cache_manager=search_cache_manager)
 
 # In-memory IP rate limiter: client_ip -> list of timestamps
 _ip_rate_limits: dict[str, list[float]] = defaultdict(list)
@@ -468,15 +471,17 @@ async def add_magnet(
     _: str = Depends(get_current_user),
 ):
     try:
-        magnet = Magnet(req.magnet)
+        session = await engine_manager.add_magnet(req.magnet)
         return {
             "success": True,
-            "info_hash": magnet.info_hash_hex,
-            "name": magnet.name or "Magnet Download",
-            "message": "Magnet link registered",
+            "info_hash": session.torrent.info_hash_hex,
+            "name": session.torrent.name,
+            "message": f"Started download: {session.torrent.name}",
         }
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid magnet link: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to add magnet: {e}")
 
 
 @app.post("/api/torrents/{info_hash}/pause")
@@ -593,9 +598,10 @@ async def search_torrents(
     hide_dead: bool = Query(True, description="Filter for torrents with active seeds (with auto fallback)"),
     limit: int = Query(100, ge=1, le=200),
     timeout: float = Query(30.0, ge=5.0, le=300.0, description="Max search timeout in seconds"),
+    refresh: bool = Query(False, description="Bypass cache and force fresh search across indexers"),
     _: str = Depends(get_current_user),
 ):
-    """Searches external torrent indexers cleanly with no ads and returns ranked results."""
+    """Searches external torrent indexers cleanly with caching and returns ranked results."""
     try:
         results = await search_service.search(
             query=q,
@@ -603,10 +609,18 @@ async def search_torrents(
             hide_dead=hide_dead,
             limit=limit,
             timeout=timeout,
+            refresh=refresh,
         )
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+
+@app.get("/api/search/recent")
+async def get_recent_searches(_: str = Depends(get_current_user)):
+    """Returns up to 10 recent searches from the persistent search cache."""
+    return {"recent_searches": search_cache_manager.get_recent(limit=10)}
+
 
 
 # Mount static files

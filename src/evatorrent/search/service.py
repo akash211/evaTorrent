@@ -11,6 +11,7 @@ from evatorrent.search.base import (
     SearchCategory,
     SearchResult,
 )
+from evatorrent.search.cache import SearchCacheManager
 from evatorrent.search.piratebay import PirateBaySearchProvider
 
 import re
@@ -65,11 +66,16 @@ def get_query_variations(query: str) -> list[str]:
 class SearchService:
     """Coordinates parallel querying of torrent indexers, ranking, and deduplication."""
 
-    def __init__(self, providers: Sequence[BaseSearchProvider] | None = None):
+    def __init__(
+        self,
+        providers: Sequence[BaseSearchProvider] | None = None,
+        cache_manager: SearchCacheManager | None = None,
+    ):
         if providers is None:
             self.providers = [PirateBaySearchProvider()]
         else:
             self.providers = list(providers)
+        self.cache_manager = cache_manager
 
     async def search(
         self,
@@ -78,23 +84,9 @@ class SearchService:
         hide_dead: bool = True,
         limit: int = 100,
         timeout: float = 30.0,
+        refresh: bool = False,
     ) -> dict:
-        """Searches across configured providers with fallback spelling suggestions.
-
-        Parameters
-        ----------
-        query : str
-            The search query.
-        category : str
-            One of: all, movies, series, software, games, books.
-        hide_dead : bool
-            If True, prioritizes and filters for torrents with active seeders (> 0).
-            If no active torrents exist, automatically falls back to showing all matches.
-        limit : int
-            Maximum number of results to return.
-        timeout : float
-            Timeout in seconds for provider queries.
-        """
+        """Searches across configured providers with fallback spelling suggestions and caching."""
         q = query.strip()
         if not q:
             return {
@@ -104,6 +96,7 @@ class SearchService:
                 "returned": 0,
                 "fallback_applied": False,
                 "suggestion": None,
+                "is_cached": False,
                 "results": [],
             }
 
@@ -111,6 +104,13 @@ class SearchService:
             cat_enum = SearchCategory(category.lower())
         except ValueError:
             cat_enum = SearchCategory.ALL
+
+        # 0. Check cache if not explicitly refreshing
+        if not refresh and self.cache_manager:
+            cached_entry = self.cache_manager.get(q, cat_enum.value)
+            if cached_entry:
+                logger.info(f"Serving search for '{q}' ({cat_enum.value}) from cache ({cached_entry.get('cache_age_human')})")
+                return cached_entry
 
         async def _query_providers(search_term: str) -> list[SearchResult]:
             tasks = [p.search(search_term, category=cat_enum, timeout=timeout) for p in self.providers]
@@ -160,12 +160,26 @@ class SearchService:
 
         final_slice = final_results[:limit]
 
-        return {
+        ret = {
             "query": q,
             "category": cat_enum.value,
             "total_found": total_found,
             "returned": len(final_slice),
             "fallback_applied": fallback_applied,
             "suggestion": suggestion_used,
+            "is_cached": False,
             "results": [item.to_dict() for item in final_slice],
         }
+
+        # Cache results if any found
+        if total_found > 0 and self.cache_manager:
+            self.cache_manager.set(
+                query=q,
+                category=cat_enum.value,
+                results=ret["results"],
+                suggestion=suggestion_used,
+                total_found=total_found,
+                fallback_applied=fallback_applied,
+            )
+
+        return ret

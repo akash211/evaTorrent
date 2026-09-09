@@ -1,5 +1,4 @@
 import pytest
-from unittest.mock import AsyncMock, patch
 from unittest.mock import AsyncMock, MagicMock, patch
 from httpx import ASGITransport, AsyncClient
 
@@ -172,3 +171,102 @@ async def test_api_search_endpoint():
             assert data["query"] == "blender"
             assert data["returned"] == 1
             assert data["results"][0]["title"] == "Blender 3D"
+
+
+def test_search_cache_manager(tmp_path):
+    from evatorrent.search.cache import SearchCacheManager, format_cache_age
+
+    assert format_cache_age(10) == "just now"
+    assert format_cache_age(120) == "2 mins ago"
+    assert format_cache_age(7200) == "2 hours ago"
+    assert format_cache_age(172800) == "2 days ago"
+
+    cache_dir = tmp_path / "cached_results"
+    cm = SearchCacheManager(cache_dir=cache_dir, max_cached=3)
+
+    # Initially empty
+    assert cm.get("ubuntu", "all") is None
+    assert cm.get_recent(10) == []
+
+    # Save search results
+    res1 = [{"title": "Ubuntu 24.04", "info_hash": "1" * 40, "seeders": 100}]
+    cm.set("ubuntu", "all", res1, total_found=1)
+
+    cached = cm.get("ubuntu", "all")
+    assert cached is not None
+    assert cached["query"] == "ubuntu"
+    assert cached["is_cached"] is True
+    assert cached["total_found"] == 1
+    assert cached["results"][0]["title"] == "Ubuntu 24.04"
+
+    recent = cm.get_recent(limit=10)
+    assert len(recent) == 1
+    assert recent[0]["query"] == "ubuntu"
+
+    # Save more items to test pruning up to max_cached=3
+    cm.set("debian", "all", [{"title": "Debian", "info_hash": "2" * 40}])
+    cm.set("arch", "all", [{"title": "Arch", "info_hash": "3" * 40}])
+    cm.set("fedora", "all", [{"title": "Fedora", "info_hash": "4" * 40}])
+
+    # With max_cached=3, 'ubuntu' (oldest) should have been pruned
+    index = cm._load_index()
+    assert len(index) == 3
+    queries = [i["query"] for i in index]
+    assert queries == ["fedora", "arch", "debian"]
+    assert cm.get("ubuntu", "all") is None
+    assert cm.get("fedora", "all") is not None
+
+
+@pytest.mark.asyncio
+async def test_search_service_caching_and_refresh(tmp_path):
+    from evatorrent.search.cache import SearchCacheManager
+
+    cm = SearchCacheManager(cache_dir=tmp_path / "cached_results")
+    provider_calls = 0
+
+    class CountingProvider(BaseSearchProvider):
+        name = "CountingProvider"
+
+        async def search(self, query, category=SearchCategory.ALL, timeout=None):
+            nonlocal provider_calls
+            provider_calls += 1
+            return [SearchResult("Item", "f" * 40, "mag:f", 100, "100 B", 5, 1, "All", "Counting")]
+
+    service = SearchService(providers=[CountingProvider()], cache_manager=cm)
+
+    # 1. First search: calls provider and populates cache
+    res1 = await service.search("hello", refresh=False)
+    assert res1["is_cached"] is False
+    assert provider_calls == 1
+
+    # 2. Second search: should be served directly from cache (provider not called)
+    res2 = await service.search("hello", refresh=False)
+    assert res2["is_cached"] is True
+    assert provider_calls == 1
+
+    # 3. Third search with refresh=True: forces live query and bypasses cache
+    res3 = await service.search("hello", refresh=True)
+    assert res3["is_cached"] is False
+    assert provider_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_api_recent_searches_endpoint():
+    auth_config.set_admin_email("admin@example.com")
+    token = session_manager.create_token("admin@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    transport = ASGITransport(app=app)
+    with patch("evatorrent.web.app.search_cache_manager.get_recent") as mock_recent:
+        mock_recent.return_value = [
+            {"query": "ted lasso", "category": "series", "cached_timestamp": 1234567890, "total_results": 5, "cache_age_human": "5 mins ago"}
+        ]
+
+        async with AsyncClient(transport=transport, base_url="http://testserver", headers=headers) as client:
+            resp = await client.get("/api/search/recent")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "recent_searches" in data
+            assert len(data["recent_searches"]) == 1
+            assert data["recent_searches"][0]["query"] == "ted lasso"
+

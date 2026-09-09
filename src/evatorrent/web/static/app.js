@@ -70,6 +70,7 @@ async function checkAuth() {
       userGroup.classList.remove('hidden');
       userDisplay.textContent = data.user_email;
       connectWebSocket();
+      loadRecentSearches();
       return true;
     }
   } catch (err) {
@@ -778,6 +779,7 @@ function switchMainView(view) {
   if (view === 'analytics') {
     loadAnalyticsData();
   } else if (view === 'search') {
+    loadRecentSearches();
     setTimeout(() => document.getElementById('indexer-search-query')?.focus(), 50);
   }
 }
@@ -1008,7 +1010,60 @@ function applySuggestionSearch() {
   }
 }
 
-async function executeTorrentSearch() {
+async function loadRecentSearches() {
+  try {
+    const res = await fetch('/api/search/recent');
+    if (!res.ok) return;
+    const data = await res.json();
+    const recent = data.recent_searches || [];
+    renderRecentSearches(recent);
+  } catch (e) {
+    console.debug('Failed to load recent searches:', e);
+  }
+}
+
+function renderRecentSearches(items) {
+  const container = document.getElementById('search-recent-chips');
+  const box = document.getElementById('search-recent-box');
+  if (!container || !box) return;
+
+  if (!items || items.length === 0) {
+    box.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
+  box.classList.remove('hidden');
+  container.innerHTML = items.map(item => {
+    const safeQ = escapeHtml(item.query);
+    const catLabel = item.category && item.category !== 'all' ? `<span class="recent-chip-cat">${escapeHtml(item.category)}</span>` : '';
+    const ageLabel = item.cache_age_human ? `<span class="recent-chip-age">• ${escapeHtml(item.cache_age_human)}</span>` : '';
+    const escapedQueryArg = escapeHtml(item.query.replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+    const escapedCatArg = escapeHtml((item.category || 'all').replace(/'/g, "\\'"));
+
+    return `
+      <button type="button" class="recent-chip" onclick="applyRecentSearch('${escapedQueryArg}', '${escapedCatArg}')" title="Search for '${safeQ}' (${item.total_results || 0} cached results)">
+        <span>${safeQ}</span>
+        ${catLabel}
+        ${ageLabel}
+      </button>
+    `;
+  }).join('');
+}
+
+function applyRecentSearch(query, category) {
+  const input = document.getElementById('indexer-search-query');
+  if (input) input.value = query;
+  if (category) {
+    currentSearchCategory = category;
+    document.querySelectorAll('.cat-pill').forEach(pill => {
+      pill.classList.toggle('active', pill.dataset.cat === category);
+    });
+  }
+  executeTorrentSearch(false);
+}
+
+async function executeTorrentSearch(forceRefresh = false) {
   const input = document.getElementById('indexer-search-query');
   const query = input?.value.trim() || '';
   if (!query) {
@@ -1033,6 +1088,8 @@ async function executeTorrentSearch() {
   const stageLabel = document.getElementById('search-stage-label');
   const timerLabel = document.getElementById('search-timer-label');
   const suggestionBox = document.getElementById('search-suggestion-box');
+  const cacheBanner = document.getElementById('search-cache-banner');
+  const cacheText = document.getElementById('search-cache-text');
   const emptyEl = document.getElementById('search-empty-state');
   const resultsContainer = document.getElementById('search-results-container');
   const statusBar = document.getElementById('search-status-bar');
@@ -1046,12 +1103,13 @@ async function executeTorrentSearch() {
   statusBar?.classList.add('hidden');
   fallbackBadge?.classList.add('hidden');
   suggestionBox?.classList.add('hidden');
+  cacheBanner?.classList.add('hidden');
 
   // Start animated progress and timer
   progressBox?.classList.remove('hidden');
   if (progressFill) progressFill.style.width = '10%';
   if (percentLabel) percentLabel.textContent = '10%';
-  if (stageLabel) stageLabel.textContent = 'Connecting to indexer swarms...';
+  if (stageLabel) stageLabel.textContent = forceRefresh ? 'Refreshing indexer swarms (bypassing cache)...' : 'Connecting to indexer swarms...';
 
   const startTime = Date.now();
   if (searchTimerInterval) clearInterval(searchTimerInterval);
@@ -1085,6 +1143,9 @@ async function executeTorrentSearch() {
       hide_dead: activeOnly ? 'true' : 'false',
       timeout: timeoutSec.toString(),
     });
+    if (forceRefresh) {
+      params.append('refresh', 'true');
+    }
 
     const res = await fetch(`/api/search?${params.toString()}`, {
       signal: activeSearchController.signal,
@@ -1113,6 +1174,21 @@ async function executeTorrentSearch() {
 
     const results = data.results || [];
 
+    // Check if results are from cache and show banner
+    if (data.is_cached && cacheBanner && cacheText) {
+      let cachedDateStr = '';
+      if (data.cached_at) {
+        try {
+          const d = new Date(data.cached_at);
+          cachedDateStr = ` • ${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+        } catch (_) {}
+      }
+      cacheText.textContent = `Results loaded from cache (${data.cache_age_human || 'saved'}${cachedDateStr})`;
+      cacheBanner.classList.remove('hidden');
+    } else {
+      cacheBanner?.classList.add('hidden');
+    }
+
     // Check if a spelling/keyword suggestion was used
     if (data.suggestion && data.suggestion.toLowerCase() !== query.toLowerCase()) {
       const suggestedEl = document.getElementById('search-suggested-query');
@@ -1120,6 +1196,11 @@ async function executeTorrentSearch() {
       if (suggestedEl) suggestedEl.textContent = data.suggestion;
       if (originalEl) originalEl.textContent = query;
       suggestionBox?.classList.remove('hidden');
+    }
+
+    // Refresh recent searches list if results found
+    if (data.total_found > 0) {
+      loadRecentSearches();
     }
 
     if (results.length === 0) {
@@ -1147,7 +1228,8 @@ async function executeTorrentSearch() {
     emptyEl?.classList.add('hidden');
 
     if (statusText) {
-      statusText.textContent = `Found ${data.total_found} torrents (showing ${results.length}) in ${elapsedTotal}s`;
+      const sourceNote = data.is_cached ? ' [Cached]' : '';
+      statusText.textContent = `Found ${data.total_found} torrents (showing ${results.length}) in ${elapsedTotal}s${sourceNote}`;
     }
     statusBar?.classList.remove('hidden');
 

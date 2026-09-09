@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from evatorrent.db.database import Database
 from evatorrent.engine.session import TorrentSession
-from evatorrent.torrent import Torrent
+from evatorrent.torrent import Magnet, Torrent, fetch_torrent_from_caches
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,46 @@ class EngineManager:
 
     def add_torrent_file(self, filepath: Path, output_dir: Optional[Path] = None) -> TorrentSession:
         torrent = Torrent.from_file(filepath)
+        return self.add_torrent(torrent, output_dir)
+
+    async def add_magnet(self, magnet_uri: str, output_dir: Optional[Path] = None) -> TorrentSession:
+        """Resolves magnet link metadata and enrolls the download in the engine."""
+        magnet = Magnet(magnet_uri)
+        info_hash_hex = magnet.info_hash_hex.lower()
+        if info_hash_hex in self.sessions:
+            return self.sessions[info_hash_hex]
+
+        cache_dir = self.download_dir / ".torrent_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        torrent_file = cache_dir / f"{info_hash_hex}.torrent"
+
+        raw_bytes: Optional[bytes] = None
+        if torrent_file.exists():
+            try:
+                raw_bytes = torrent_file.read_bytes()
+            except Exception:
+                raw_bytes = None
+
+        if not raw_bytes:
+            raw_bytes = await fetch_torrent_from_caches(info_hash_hex)
+            if raw_bytes:
+                try:
+                    torrent_file.write_bytes(raw_bytes)
+                except Exception as e:
+                    logger.warning(f"Failed to cache torrent file: {e}")
+
+        if not raw_bytes:
+            name_hint = f' "{magnet.name}"' if magnet.name else ""
+            raise ValueError(
+                f"Could not retrieve metadata for magnet{name_hint} ({info_hash_hex[:8]}...). "
+                f"The torrent metainfo was not found in public torrent caches. Please upload the .torrent file directly."
+            )
+
+        torrent = Torrent(raw_bytes)
+        for tr in magnet.trackers:
+            if tr not in torrent.trackers:
+                torrent.trackers.append(tr)
+
         return self.add_torrent(torrent, output_dir)
 
     def get_session(self, info_hash_hex: str) -> Optional[TorrentSession]:

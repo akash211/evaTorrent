@@ -90,3 +90,32 @@ def test_engine_manager_download_dir_env(monkeypatch, tmp_path):
     assert manager.download_dir == custom_dir
     assert custom_dir.exists()
 
+
+@pytest.mark.asyncio
+async def test_engine_manager_add_magnet(tmp_path):
+    from unittest.mock import patch
+    torrent = create_dummy_torrent()
+    raw_torrent_bytes = torrent.raw_data
+
+    manager = EngineManager(default_download_dir=tmp_path)
+    magnet_uri = f"magnet:?xt=urn:btih:{torrent.info_hash_hex}&dn=dummy.iso&tr=http%3A%2F%2Ftracker.example.com%2Fannounce"
+
+    with patch("evatorrent.engine.manager.fetch_torrent_from_caches") as mock_fetch:
+        mock_fetch.return_value = raw_torrent_bytes
+        session = await manager.add_magnet(magnet_uri)
+        assert session is not None
+        assert session.torrent.info_hash_hex == torrent.info_hash_hex
+        assert torrent.info_hash_hex in manager.sessions
+        assert session.status == TorrentStatus.DOWNLOADING
+
+        # Cache file must have been persisted
+        torrent_cache = tmp_path / ".torrent_cache" / f"{torrent.info_hash_hex}.torrent"
+        assert torrent_cache.exists()
+
+        # Calling again with same magnet should return existing session without re-fetching
+        session2 = await manager.add_magnet(magnet_uri)
+        assert session2 is session
+
+    await manager.shutdown()
+
+
