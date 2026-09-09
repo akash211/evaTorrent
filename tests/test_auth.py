@@ -71,11 +71,22 @@ def test_auth_endpoints_and_route_protection():
         resp_setup_err = client.post("/api/auth/setup", json={"admin_email": "invalid"})
         assert resp_setup_err.status_code == 400
 
-        # 4. Valid setup
-        resp_setup = client.post("/api/auth/setup", json={"admin_email": "admin@example.com"})
+        # 4. Valid setup with google_client_id
+        resp_setup = client.post(
+            "/api/auth/setup",
+            json={"admin_email": "admin@example.com", "google_client_id": "google-test-id-123.apps.googleusercontent.com"},
+        )
         assert resp_setup.status_code == 200
         token = resp_setup.json()["token"]
         assert token is not None
+
+        # 4b. Status without session token still exposes google_client_id for login page
+        unauth_client = TestClient(app)
+        resp_unauth = unauth_client.get("/api/auth/status")
+        assert resp_unauth.status_code == 200
+        unauth_data = resp_unauth.json()
+        assert unauth_data["google_enabled"] is True
+        assert unauth_data["google_client_id"] == "google-test-id-123.apps.googleusercontent.com"
 
         # 5. Access with valid token header
         resp_torrents = client.get(

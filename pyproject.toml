@@ -1,6 +1,6 @@
 [project]
 name = "evatorrent"
-version = "0.4.1"
+version = "0.4.2"
 description = "Modern BitTorrent client with asyncio, Email OTP & Google OAuth, parallel downloading, and a sleek Web UI"
 readme = "README.md"
 license = { text = "MIT" }

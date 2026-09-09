@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from evatorrent import __version__
 from evatorrent.auth import (
     AuthConfig,
     EmailSender,
@@ -125,8 +126,7 @@ async def telemetry_loop():
             pass
 
 
-app = FastAPI(title="evaTorrent API", version="0.3.0", lifespan=lifespan)
-app = FastAPI(title="evaTorrent API", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="evaTorrent API", version=__version__, lifespan=lifespan)
 
 @app.middleware("http")
 async def https_enforcement_middleware(request: Request, call_next):
@@ -232,7 +232,7 @@ async def auth_status(
         "setup_required": not auth_config.is_setup_done,
         "admin_email_masked": display_admin,
         "google_enabled": bool(auth_config.google_client_id),
-        "google_client_id": auth_config.google_client_id if verified_email else None,
+        "google_client_id": auth_config.google_client_id,
         "is_authenticated": verified_email is not None,
         "user_email": verified_email,
         "smtp_configured": auth_config.is_smtp_configured,

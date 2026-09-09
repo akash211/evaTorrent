@@ -1,6 +1,6 @@
 services:
   evatorrent:
-    image: akashkece/evatorrent:0.4.1
+    image: akashkece/evatorrent:0.4.2
     container_name: evatorrent
     restart: unless-stopped
     ports:

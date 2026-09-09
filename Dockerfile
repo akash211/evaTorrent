@@ -27,6 +27,7 @@ RUN mkdir -p /downloads /data \
 
 ENV DOWNLOAD_DIR=/downloads
 ENV EVA_DATA_DIR=/data
+ENV PATH="/app/.venv/bin:$PATH"
 
 USER evatorrent
 
@@ -37,4 +38,5 @@ EXPOSE 6881/udp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/api/auth/status || exit 1
 
-ENTRYPOINT ["uv", "run", "evatorrent", "web", "--host", "0.0.0.0", "--port", "8080"]
+ENTRYPOINT ["uv", "run", "--no-sync", "evatorrent", "web", "--host", "0.0.0.0", "--port", "8080"]
+
