@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
 import math
+
+logger = logging.getLogger("evaTorrent.torrent")
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
@@ -171,26 +174,37 @@ async def fetch_torrent_from_caches(info_hash_hex: str, timeout: float = 8.0) ->
     """Fetches .torrent file bytes from public torrent caches for a given info hash."""
     clean_hash = info_hash_hex.strip().upper()
     cache_urls = [
+        f"https://itorrents.net/torrent/{clean_hash}.torrent",
+        f"http://itorrents.net/torrent/{clean_hash}.torrent",
         f"https://itorrents.org/torrent/{clean_hash}.torrent",
-        f"http://itorrents.org/torrent/{clean_hash}.torrent",
-        f"https://torrage.info/torrent.php?h={clean_hash}",
-        f"http://torrage.info/torrent.php?h={clean_hash}",
-        f"https://btcache.me/torrent/{clean_hash}",
         f"https://cache.torrentstorage.com/gettorrent.php?h={clean_hash}",
     ]
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/x-bittorrent, */*",
     }
+
+    logger.info(f"[CACHE] Resolving metainfo for info_hash={clean_hash[:8]}... across {len(cache_urls)} mirrors")
 
     async def _fetch_single(client: httpx.AsyncClient, url: str) -> Optional[bytes]:
         try:
             resp = await client.get(url)
             if resp.status_code == 200 and len(resp.content) > 100:
-                decoded = bdecode(resp.content)
-                if isinstance(decoded, dict) and b"info" in decoded:
-                    return resp.content
-        except Exception:
-            pass
+                try:
+                    decoded = bdecode(resp.content)
+                    if isinstance(decoded, dict) and b"info" in decoded:
+                        logger.info(f"[CACHE SUCCESS] Found valid .torrent ({len(resp.content)} bytes) via {url}")
+                        return resp.content
+                    else:
+                        logger.debug(f"[CACHE SKIP] {url} returned 200 OK but content is not a valid bencoded torrent dictionary")
+                except Exception as berr:
+                    logger.debug(f"[CACHE SKIP] {url} returned 200 OK but failed bdecode: {berr}")
+            elif resp.status_code == 451:
+                logger.warning(f"[CACHE BLOCKED] Mirror {url} returned HTTP 451 (ISP/network block)")
+            else:
+                logger.debug(f"[CACHE] Mirror {url} returned HTTP {resp.status_code}")
+        except Exception as e:
+            logger.debug(f"[CACHE ERROR] Mirror {url} connection failed: {e}")
         return None
 
     try:
@@ -203,7 +217,9 @@ async def fetch_torrent_from_caches(info_hash_hex: str, timeout: float = 8.0) ->
                         if not t.done():
                             t.cancel()
                     return res
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"[CACHE ERROR] Exception during concurrent cache resolution for {clean_hash[:8]}: {e}")
+
+    logger.warning(f"[CACHE EXHAUSTED] Could not retrieve .torrent metainfo for {clean_hash[:8]} from any cache mirror")
     return None
 

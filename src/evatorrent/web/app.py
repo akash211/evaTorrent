@@ -473,10 +473,12 @@ async def upload_torrent(
 @app.post("/api/torrents/url")
 async def add_magnet(
     req: MagnetRequest,
-    _: str = Depends(get_current_user),
+    user: str = Depends(get_current_user),
 ):
+    logger.info(f"[API] User '{user}' requested adding torrent: {req.magnet[:70]}...")
     try:
         session = await engine_manager.add_torrent_or_url(req.magnet)
+        logger.info(f"[API SUCCESS] Enrolled torrent '{session.torrent.name}' ({session.torrent.info_hash_hex[:8]}) for user '{user}'")
         return {
             "success": True,
             "info_hash": session.torrent.info_hash_hex,
@@ -484,8 +486,10 @@ async def add_magnet(
             "message": f"Started download: {session.torrent.name}",
         }
     except ValueError as e:
+        logger.warning(f"[API 422] Failed enrolling torrent: {e}")
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
+        logger.error(f"[API 500] Unexpected error enrolling torrent: {e}")
         raise HTTPException(status_code=400, detail=f"Failed to add torrent: {e}")
 
 
@@ -514,6 +518,7 @@ async def download_torrent_file(
     if len(clean_hash) != 40:
         raise HTTPException(status_code=400, detail="Invalid 40-character info hash.")
 
+    logger.info(f"[API] Download .torrent requested for info_hash={clean_hash[:8]} ('{name or ''}') by '{verified_email}'")
     cache_dir = engine_manager.download_dir / ".torrent_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     torrent_file = cache_dir / f"{clean_hash}.torrent"
@@ -522,18 +527,22 @@ async def download_torrent_file(
     if torrent_file.exists():
         try:
             raw_bytes = torrent_file.read_bytes()
+            logger.info(f"[API] Serving .torrent file from local disk cache ({len(raw_bytes)} bytes)")
         except Exception:
             raw_bytes = None
 
     if not raw_bytes:
+        logger.info(f"[API] .torrent file not cached on disk; querying public CDN caches for {clean_hash[:8]}...")
         raw_bytes = await fetch_torrent_from_caches(clean_hash)
         if raw_bytes:
             try:
                 torrent_file.write_bytes(raw_bytes)
+                logger.info(f"[API] Successfully downloaded and cached .torrent for {clean_hash[:8]}")
             except Exception as e:
                 logger.warning(f"Failed to cache torrent file: {e}")
 
     if not raw_bytes:
+        logger.warning(f"[API 404] Metainfo file (.torrent) not available in public caches for {clean_hash[:8]}")
         raise HTTPException(
             status_code=404,
             detail="Metainfo file (.torrent) is not yet available in public caches. You can still download via Magnet link directly in evaTorrent.",
@@ -668,9 +677,11 @@ async def search_torrents(
     limit: int = Query(100, ge=1, le=200),
     timeout: float = Query(30.0, ge=5.0, le=300.0, description="Max search timeout in seconds"),
     refresh: bool = Query(False, description="Bypass cache and force fresh search across indexers"),
-    _: str = Depends(get_current_user),
+    user: str = Depends(get_current_user),
 ):
     """Searches external torrent indexers cleanly with caching and returns ranked results."""
+    t0 = time.time()
+    logger.info(f"[SEARCH API] User '{user}' searching '{q}' (cat={category}, refresh={refresh})")
     try:
         results = await search_service.search(
             query=q,
@@ -680,8 +691,11 @@ async def search_torrents(
             timeout=timeout,
             refresh=refresh,
         )
+        elapsed = round(time.time() - t0, 2)
+        logger.info(f"[SEARCH API] Returned {results.get('returned', 0)} results for '{q}' in {elapsed}s (cached={results.get('is_cached')})")
         return results
     except Exception as e:
+        logger.error(f"[SEARCH API ERROR] Search failed for '{q}': {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {e}")
 
 

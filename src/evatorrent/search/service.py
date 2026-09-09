@@ -12,6 +12,7 @@ from evatorrent.search.base import (
     SearchResult,
 )
 from evatorrent.search.cache import SearchCacheManager
+from evatorrent.search.limetorrents import LimeTorrentsSearchProvider
 from evatorrent.search.piratebay import PirateBaySearchProvider
 
 import re
@@ -72,7 +73,7 @@ class SearchService:
         cache_manager: SearchCacheManager | None = None,
     ):
         if providers is None:
-            self.providers = [PirateBaySearchProvider()]
+            self.providers = [PirateBaySearchProvider(), LimeTorrentsSearchProvider()]
         else:
             self.providers = list(providers)
         self.cache_manager = cache_manager

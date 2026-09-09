@@ -69,6 +69,7 @@ class EngineManager:
         magnet = Magnet(magnet_uri)
         info_hash_hex = magnet.info_hash_hex.lower()
         if info_hash_hex in self.sessions:
+            logger.info(f"[ENGINE] Magnet {info_hash_hex[:8]} is already active in swarm sessions")
             return self.sessions[info_hash_hex]
 
         cache_dir = self.download_dir / ".torrent_cache"
@@ -79,39 +80,47 @@ class EngineManager:
         if torrent_file.exists():
             try:
                 raw_bytes = torrent_file.read_bytes()
-            except Exception:
+                logger.info(f"[ENGINE] Loaded cached .torrent for {info_hash_hex[:8]} from disk ({len(raw_bytes)} bytes)")
+            except Exception as e:
+                logger.warning(f"[ENGINE] Failed reading local cached .torrent for {info_hash_hex[:8]}: {e}")
                 raw_bytes = None
 
         if not raw_bytes:
+            logger.info(f"[ENGINE] Fetching metainfo for magnet '{magnet.name or info_hash_hex[:8]}' from public caches...")
             raw_bytes = await fetch_torrent_from_caches(info_hash_hex)
             if raw_bytes:
                 try:
                     torrent_file.write_bytes(raw_bytes)
+                    logger.info(f"[ENGINE] Successfully saved .torrent for {info_hash_hex[:8]} to local cache")
                 except Exception as e:
-                    logger.warning(f"Failed to cache torrent file: {e}")
+                    logger.warning(f"[ENGINE] Failed to cache torrent file: {e}")
 
         if not raw_bytes:
             name_hint = f' "{magnet.name}"' if magnet.name else ""
-            raise ValueError(
+            err_msg = (
                 f"Could not retrieve metadata for magnet{name_hint} ({info_hash_hex[:8]}...). "
                 f"The torrent metainfo was not found in public torrent caches. Please upload the .torrent file directly."
             )
+            logger.warning(f"[ENGINE] {err_msg}")
+            raise ValueError(err_msg)
 
         torrent = Torrent(raw_bytes)
         for tr in magnet.trackers:
             if tr not in torrent.trackers:
                 torrent.trackers.append(tr)
 
+        logger.info(f"[ENGINE] Successfully enrolled magnet '{torrent.name}' ({len(torrent.trackers)} trackers)")
         return self.add_torrent(torrent, output_dir)
 
     async def add_url(self, url: str, output_dir: Optional[Path] = None) -> TorrentSession:
         """Downloads a .torrent file from an HTTP/HTTPS URL and enrolls it."""
         clean_url = url.strip()
+        logger.info(f"[ENGINE] Fetching torrent from remote URL: {clean_url}")
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         }
         try:
-            async with httpx.AsyncClient(headers=headers, timeout=15.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(headers=headers, timeout=15.0, follow_redirects=True, verify=False) as client:
                 resp = await client.get(clean_url)
                 if resp.status_code != 200:
                     raise ValueError(f"HTTP request to torrent URL failed with status {resp.status_code}")
@@ -127,12 +136,14 @@ class EngineManager:
                     is_bencoded = False
 
                 if is_bencoded:
+                    logger.info(f"[ENGINE] URL returned valid .torrent ({len(content)} bytes)")
                     return self.add_torrent_bytes(content, output_dir)
 
                 # If not direct torrent bytes, check if response text contains a magnet link
                 text = resp.text
                 magnet_match = re.search(r'magnet:\?[^"\'\s<>]+', text)
                 if magnet_match:
+                    logger.info("[ENGINE] URL response contained embedded magnet link. Enrolling magnet...")
                     return await self.add_magnet(magnet_match.group(0), output_dir)
 
                 raise ValueError("URL did not return a valid .torrent file or magnet link.")
@@ -143,6 +154,7 @@ class EngineManager:
 
     async def add_torrent_or_url(self, input_str: str, output_dir: Optional[Path] = None) -> TorrentSession:
         """Accepts a magnet link, HTTP/HTTPS URL, or file path and enrolls it."""
+        logger.info(f"[ENGINE] add_torrent_or_url received input: {input_str[:60]}...")
         s = input_str.strip()
         if s.startswith("magnet:?"):
             return await self.add_magnet(s, output_dir)

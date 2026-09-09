@@ -336,3 +336,47 @@ async def test_add_torrent_via_web_url():
             assert data["name"] == "test_item"
 
 
+@pytest.mark.asyncio
+async def test_limetorrents_provider_parsing():
+    from evatorrent.search.limetorrents import LimeTorrentsSearchProvider, parse_size_to_bytes
+
+    assert parse_size_to_bytes("10.99 MB") == int(10.99 * 1024 * 1024)
+    assert parse_size_to_bytes("1.5 GB") == int(1.5 * 1024 * 1024 * 1024)
+    assert parse_size_to_bytes("500 KB") == int(500 * 1024)
+
+    provider = LimeTorrentsSearchProvider()
+    fake_html = """
+    <tr>
+      <td class="tdleft">
+        <div class="tt-name">
+          <a href="http://itorrents.net/torrent/38A88D94BC8C3A7B4EC13C50AC05BB60FFDBBC0D.torrent?title=Just+Like+Heaven" rel="nofollow" class="csprite_dl14"></a>
+          <a href="/Just-Like-Heaven-2005-torrent-12345.html">Just Like Heaven 2005 1080p</a>
+        </div>
+      </td>
+      <td class="tdnormal">1 Year+ - in Movies</a></td>
+      <td class="tdnormal">2.1 GB</td>
+      <td class="tdseed">45</td>
+      <td class="tdleech">12</td>
+    </tr>
+    """
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = fake_html
+        mock_get.return_value = mock_resp
+
+        results = await provider.search("just like heaven")
+        assert len(results) == 1
+        r = results[0]
+        assert r.title == "Just Like Heaven 2005 1080p"
+        assert r.info_hash == "38a88d94bc8c3a7b4ec13c50ac05bb60ffdbbc0d"
+        assert r.seeders == 45
+        assert r.leechers == 12
+        assert r.size_formatted == "2.1 GB"
+        assert r.category == "Movies"
+        assert r.provider == "LimeTorrents"
+        assert r.torrent_url == "https://itorrents.net/torrent/38A88D94BC8C3A7B4EC13C50AC05BB60FFDBBC0D.torrent"
+        assert "https://www.limetorrents.lol/Just-Like-Heaven" in r.source_url
+
+
