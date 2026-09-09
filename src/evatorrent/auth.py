@@ -291,16 +291,15 @@ class EmailSender:
         self.config = config
 
     async def send_otp(self, recipient_email: str, otp: str) -> bool:
-        """Sends OTP via SMTP if configured, otherwise prints to console."""
-        # Print to console/docker log always for easy dev & recovery access
-        print("\n" + "=" * 62, flush=True)
-        print(f"  ⚡ [evaTorrent AUTH] Login OTP for {recipient_email}: {otp}", flush=True)
-        print(f"  Valid for 10 minutes.", flush=True)
-        print("=" * 62 + "\n", flush=True)
-
+        """Sends OTP via SMTP if configured, otherwise prints to console for dev/recovery."""
         logger.info(f"Generated Login OTP for {recipient_email}")
 
         if not self.config.is_smtp_configured:
+            # Print to console/docker log only when SMTP is not configured
+            print("\n" + "=" * 62, flush=True)
+            print(f"  ⚡ [evaTorrent AUTH] Login OTP for {recipient_email}: {otp}", flush=True)
+            print(f"  Valid for 10 minutes (SMTP not configured).", flush=True)
+            print("=" * 62 + "\n", flush=True)
             logger.info("SMTP is not configured. OTP printed to server logs.")
             return True
 

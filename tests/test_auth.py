@@ -116,3 +116,33 @@ def test_auth_endpoints_and_route_protection():
         )
         assert resp_verify.status_code == 200
         assert "evatorrent_session" in resp_verify.cookies
+
+
+@pytest.mark.asyncio
+async def test_email_sender_no_log_when_smtp_configured(capsys):
+    from evatorrent.auth import EmailSender
+    with tempfile.TemporaryDirectory() as tmp:
+        # 1. Unconfigured SMTP -> prints OTP to stdout
+        cfg_unconfigured = AuthConfig(data_dir=Path(tmp) / "cfg1")
+        sender1 = EmailSender(cfg_unconfigured)
+        await sender1.send_otp("user@example.com", "123456")
+        captured = capsys.readouterr()
+        assert "123456" in captured.out
+
+        # 2. Configured SMTP -> does NOT print OTP to stdout
+        cfg_configured = AuthConfig(data_dir=Path(tmp) / "cfg2")
+        cfg_configured._persisted.update({
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "smtp_user": "u",
+            "smtp_password": "p",
+            "smtp_from": "no-reply@example.com",
+        })
+        assert cfg_configured.is_smtp_configured is True
+        sender2 = EmailSender(cfg_configured)
+        sender2._send_smtp_sync = lambda email, otp: True
+        await sender2.send_otp("user@example.com", "654321")
+        captured2 = capsys.readouterr()
+        assert "654321" not in captured2.out
+
+
