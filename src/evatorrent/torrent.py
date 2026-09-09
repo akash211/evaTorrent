@@ -194,7 +194,7 @@ async def fetch_torrent_from_caches(info_hash_hex: str, timeout: float = 8.0) ->
         return None
 
     try:
-        async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True, verify=False) as client:
             tasks = [asyncio.create_task(_fetch_single(client, url)) for url in cache_urls]
             for coro in asyncio.as_completed(tasks):
                 res = await coro
