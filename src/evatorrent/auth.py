@@ -36,8 +36,11 @@ CONFIG_FILE = DEFAULT_DATA_DIR / "config.json"
 class AuthConfig:
     """Manages application auth configuration from environment variables or persistent storage."""
 
-    def __init__(self, data_dir: Path = DEFAULT_DATA_DIR):
-        self.data_dir = Path(data_dir)
+    def __init__(self, data_dir: Optional[Path] = None):
+        if data_dir is not None:
+            self.data_dir = Path(data_dir)
+        else:
+            self.data_dir = Path(os.environ.get("EVA_DATA_DIR", Path.home() / ".evatorrent"))
         self.config_path = self.data_dir / "config.json"
         self._persisted: Dict[str, Any] = {}
         self._load()
