@@ -26,3 +26,8 @@ services:
       - SMTP_USER=
       - SMTP_PASSWORD=
       - SMTP_FROM=
+      # Optional Discover enrichment (no key required for base lookup)
+      # TMDB key unlocks accurate budget/box-office + India OTT providers
+      - TMDB_API_KEY=
+      # OMDb key unlocks IMDb/RT ratings, box office, languages
+      - OMDB_API_KEY=
