@@ -93,6 +93,28 @@ async def test_engine_restore_and_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_remove_db_only_torrent():
+    """DELETE on a 💾 saved row with no live session must succeed, not 404."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_p = Path(tmp)
+        dl = tmp_p / "dl"
+        dl.mkdir()
+        db = Database(tmp_p / "eva.db")
+        m = EngineManager(default_download_dir=dl, db=db)
+        t, _ = _make_torrent(seed=b"delete-me")
+        m.add_torrent(t)
+        m.sessions.clear()  # simulate restart: DB row survives, memory gone
+        assert m.get_swarm_snapshot()[0]["source"] == "db"
+        assert await m.remove_torrent(t.info_hash_hex) is True
+        row = db.get_torrent_history(t.info_hash_hex)
+        assert row is not None and row["status"] == "removed"
+        assert m.get_swarm_snapshot() == []
+        # unknown hash still reports False (API → 404)
+        assert await m.remove_torrent("0" * 40) is False
+        await m.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_engine_crash_downloading_resumes_downloading():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_p = Path(tmp)

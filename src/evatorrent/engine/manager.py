@@ -428,19 +428,55 @@ class EngineManager:
                 )
 
             if delete_files:
-                try:
-                    for f in session.torrent.files:
-                        fp = session.download_dir / f.path
-                        if fp.exists():
-                            fp.unlink(missing_ok=True)
-                    if session.torrent.is_multi_file:
-                        top_dir = session.download_dir / session.torrent.name
-                        if top_dir.exists() and top_dir.is_dir():
-                            shutil.rmtree(top_dir, ignore_errors=True)
-                except Exception as e:
-                    logger.warning(f"Error deleting files for {info_hash_hex}: {e}")
+                self._delete_session_files(session)
             return True
+        # DB-only fallback: a 💾 saved row with no live session (e.g. pending
+        # after restart, or cached metainfo missing). Remove the DB row so the
+        # card disappears from Live Swarm instead of 404-looping.
+        if self.db:
+            row = self.db.get_torrent_history(key)
+            if row:
+                if delete_files:
+                    self._delete_cached_files_best_effort(key, row)
+                self.db.mark_torrent_removed(info_hash=key, deleted_files=delete_files)
+                return True
         return False
+
+    def _delete_session_files(self, session: TorrentSession) -> None:
+        try:
+            for f in session.torrent.files:
+                fp = session.download_dir / f.path
+                if fp.exists():
+                    fp.unlink(missing_ok=True)
+            if session.torrent.is_multi_file:
+                top_dir = session.download_dir / session.torrent.name
+                if top_dir.exists() and top_dir.is_dir():
+                    shutil.rmtree(top_dir, ignore_errors=True)
+        except Exception as e:
+            logger.warning(f"Error deleting files: {e}")
+
+    def _delete_cached_files_best_effort(self, info_hash_hex: str, row: dict) -> None:
+        """Deletes partial files for a DB-only row using cached metainfo (best effort)."""
+        try:
+            cache_file = self._cache_path(info_hash_hex)
+            if not cache_file.exists():
+                return
+            torrent = Torrent(cache_file.read_bytes())
+            recorded = row.get("download_dir")
+            dest_dir = Path(recorded) if recorded and Path(recorded).is_absolute() else self.download_dir
+            for f in torrent.files:
+                fp = dest_dir / f.path
+                if fp.exists() and fp.is_file():
+                    fp.unlink(missing_ok=True)
+                part = dest_dir / f"{f.path}.part"
+                if part.exists() and part.is_file():
+                    part.unlink(missing_ok=True)
+            if torrent.is_multi_file:
+                top_dir = dest_dir / torrent.name
+                if top_dir.exists() and top_dir.is_dir() and not any(top_dir.iterdir()):
+                    top_dir.rmdir()
+        except Exception as e:
+            logger.warning(f"Best-effort file cleanup failed for {info_hash_hex[:8]}: {e}")
 
     async def shutdown(self) -> None:
         """Stops all running torrent sessions, persisting progress first."""
