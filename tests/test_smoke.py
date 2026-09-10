@@ -14,7 +14,10 @@ def test_compileall_src():
 
 
 def test_cli_parser_and_imports():
-    """Verifies that the CLI entrypoints and arguments can be parsed cleanly."""
+    """Verifies that the CLI entrypoints, web app, and core modules can be imported cleanly."""
+    from evatorrent.web.app import app
+    assert app is not None
+
     parser = build_parser()
     assert parser is not None
     # Test --version or invalid flag handling
