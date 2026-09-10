@@ -763,6 +763,14 @@ async def search_torrents(
         raise HTTPException(status_code=500, detail=f"Search failed: {e}")
 
 
+@app.get("/api/discover/keys")
+async def discover_keys(_: str = Depends(get_current_user)):
+    """Reports which optional Discover enrichment keys are live (booleans only)."""
+    from evatorrent.metadata import keys_configured
+
+    return {"keys_configured": keys_configured()}
+
+
 @app.get("/api/discover")
 async def discover_media(
     q: str = Query(..., min_length=1, description="Movie / show / book / game title"),

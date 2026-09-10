@@ -861,6 +861,7 @@ function switchMainView(view, updateHistory = true) {
     loadRecentSearches();
     setTimeout(() => document.getElementById('indexer-search-query')?.focus(), 50);
   } else if (view === 'discover') {
+    refreshDiscoverKeyHint();
     setTimeout(() => document.getElementById('discover-search-query')?.focus(), 50);
   }
 }
@@ -1561,27 +1562,40 @@ function discoverField(label, value) {
   return `<div class="discover-field"><span class="discover-label">${label}</span><span class="discover-value">${value}</span></div>`;
 }
 
+function applyDiscoverKeyHint(keys) {
+  const keyHint = document.getElementById('discover-key-hint');
+  if (!keyHint) return;
+  const missing = [];
+  if (!keys.tmdb) missing.push('<code>TMDB_API_KEY</code>');
+  if (!keys.omdb) missing.push('<code>OMDB_API_KEY</code>');
+  if (missing.length === 0) {
+    keyHint.classList.add('hidden');
+  } else {
+    keyHint.classList.remove('hidden');
+    keyHint.innerHTML = `No API key needed. Set ${missing.join(' / ')} on the server for accurate budget, box-office & India OTT providers.`;
+  }
+}
+
+async function refreshDiscoverKeyHint() {
+  try {
+    const res = await fetch('/api/discover/keys');
+    if (!res.ok) return;
+    const data = await res.json();
+    applyDiscoverKeyHint(data.keys_configured || {});
+  } catch (_) {
+    // Leave the static hint visible when the check itself fails.
+  }
+}
+
 function renderDiscoverResults(data) {
   const statusBar = document.getElementById('discover-status-bar');
   const statusText = document.getElementById('discover-status-text');
   const emptyEl = document.getElementById('discover-empty-state');
   const container = document.getElementById('discover-results-container');
-  const keyHint = document.getElementById('discover-key-hint');
   const results = data.results || [];
 
   // Key hint: hide when both enrichment keys are live server-side.
-  if (keyHint) {
-    const keys = data.keys_configured || {};
-    const missing = [];
-    if (!keys.tmdb) missing.push('<code>TMDB_API_KEY</code>');
-    if (!keys.omdb) missing.push('<code>OMDB_API_KEY</code>');
-    if (missing.length === 0) {
-      keyHint.classList.add('hidden');
-    } else {
-      keyHint.classList.remove('hidden');
-      keyHint.innerHTML = `No API key needed. Set ${missing.join(' / ')} on the server for accurate budget, box-office & India OTT providers.`;
-    }
-  }
+  applyDiscoverKeyHint(data.keys_configured || {});
 
   if (statusText) statusText.textContent = `Found ${data.total_found || 0} result(s) for "${data.query}" in ${data.elapsed_seconds || '?'}s`;
   if (statusBar) statusBar.classList.remove('hidden');

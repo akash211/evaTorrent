@@ -16,6 +16,6 @@ All lookups are best-effort with short timeouts; failures degrade to links.
 
 from __future__ import annotations
 
-from evatorrent.metadata.service import lookup_media
+from evatorrent.metadata.service import keys_configured, lookup_media
 
-__all__ = ["lookup_media"]
+__all__ = ["keys_configured", "lookup_media"]
