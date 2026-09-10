@@ -18,6 +18,7 @@ TOKEN_COLON = b":"[0]
 
 class BencodeError(ValueError):
     """Exception raised when bencoding / bdecoding fails."""
+
     pass
 
 
@@ -65,7 +66,7 @@ class Decoder:
         end_idx = self._data.find(b"e", self._index)
         if end_idx == -1:
             raise BencodeError("Unterminated integer")
-        raw_num = self._data[self._index:end_idx]
+        raw_num = self._data[self._index : end_idx]
         if not raw_num:
             raise BencodeError("Empty integer value")
         # Validate leading zero rules: "0" is valid, but "03" or "-0" are not
@@ -86,7 +87,7 @@ class Decoder:
         colon_idx = self._data.find(b":", self._index)
         if colon_idx == -1:
             raise BencodeError("Unterminated string length")
-        raw_len = self._data[self._index:colon_idx]
+        raw_len = self._data[self._index : colon_idx]
         if not raw_len or (len(raw_len) > 1 and raw_len.startswith(b"0")):
             raise BencodeError("Invalid string length format")
         try:
@@ -100,9 +101,7 @@ class Decoder:
         start = colon_idx + 1
         end = start + length
         if end > self._length:
-            raise BencodeError(
-                f"String length {length} exceeds remaining data ({self._length - start} bytes)"
-            )
+            raise BencodeError(f"String length {length} exceeds remaining data ({self._length - start} bytes)")
         self._index = end
         return self._data[start:end]
 
@@ -157,6 +156,7 @@ class Encoder:
             return bytes(out)
         elif isinstance(item, dict):
             out = bytearray(b"d")
+
             # Keys in bencoding dictionaries must be sorted as raw strings
             def sort_key(k: Union[bytes, str]) -> bytes:
                 if isinstance(k, bytes):

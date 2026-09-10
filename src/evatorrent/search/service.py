@@ -26,6 +26,64 @@ import re
 logger = logging.getLogger("evaTorrent.search.service")
 
 
+HINDI_PATTERNS = (
+    "hindi",
+    "hindi dubbed",
+    "hindi-dubbed",
+    "dual audio",
+    "dual-audio",
+    "dual-audio",
+    "hindi english",
+    "hindi-english",
+    "bollywood",
+    "hindi hd",
+    "hindi esub",
+    "hindi-dd",
+    "hindi cam",
+    "hindi hdts",
+)
+
+
+def is_hindi_title(title: str) -> bool:
+    t = (title or "").lower()
+    return any(p in t for p in HINDI_PATTERNS)
+
+
+def is_dual_audio_title(title: str) -> bool:
+    t = (title or "").lower()
+    return "dual" in t and "audio" in t
+
+
+def apply_audio_language_filter(
+    results: list[SearchResult],
+    hindi: bool = False,
+    english: bool = False,
+) -> tuple[list[SearchResult], bool]:
+    """Filters/boosts torrent results by Hindi/English audio preference.
+
+    - hindi only: keep Hindi / dual-audio matches.
+    - english only: drop Hindi-only matches (keep dual-audio since it has English).
+    - both: no filtering, dual-audio boosted to top.
+    - neither: unchanged.
+    Returns (filtered, filter_applied).
+    """
+    if not hindi and not english:
+        return results, False
+    if hindi and english:
+        dual = [r for r in results if is_dual_audio_title(r.title)]
+        hindi_only = [r for r in results if is_hindi_title(r.title) and not is_dual_audio_title(r.title)]
+        rest = [r for r in results if not is_hindi_title(r.title)]
+        return dual + hindi_only + rest, False
+    if hindi and not english:
+        kept = [r for r in results if is_hindi_title(r.title)]
+        # Dual-audio first (best for Hindi+English), then Hindi-only.
+        kept.sort(key=lambda r: 1 if is_dual_audio_title(r.title) else 0, reverse=True)
+        return kept, True
+    # english only
+    kept = [r for r in results if not is_hindi_title(r.title) or is_dual_audio_title(r.title)]
+    return kept, True
+
+
 def get_query_variations(query: str) -> list[str]:
     """Generates common spelling and keyword variations to maximize search matches."""
     variations: list[str] = []
@@ -99,6 +157,8 @@ class SearchService:
         limit: int = 100,
         timeout: float = 30.0,
         refresh: bool = False,
+        hindi: bool = False,
+        english: bool = False,
     ) -> dict:
         """Searches across configured providers with fallback spelling suggestions and caching."""
         q = query.strip()
@@ -111,6 +171,7 @@ class SearchService:
                 "fallback_applied": False,
                 "suggestion": None,
                 "is_cached": False,
+                "audio_filter": {"hindi": hindi, "english": english, "applied": False},
                 "results": [],
             }
 
@@ -119,11 +180,21 @@ class SearchService:
         except ValueError:
             cat_enum = SearchCategory.ALL
 
-        # 0. Check cache if not explicitly refreshing
-        if not refresh and self.cache_manager:
+        # 0. Check cache if not explicitly refreshing (language-specific cache key).
+        cache_key_q = q
+        if hindi or english:
+            tags = []
+            if hindi:
+                tags.append("hindi")
+            if english:
+                tags.append("english")
+            cache_key_q = f"{q} [{' + '.join(tags)}]"
+        if not refresh and self.cache_manager and not (hindi or english):
             cached_entry = self.cache_manager.get(q, cat_enum.value)
             if cached_entry:
-                logger.info(f"Serving search for '{q}' ({cat_enum.value}) from cache ({cached_entry.get('cache_age_human')})")
+                logger.info(
+                    f"Serving search for '{q}' ({cat_enum.value}) from cache ({cached_entry.get('cache_age_human')})"
+                )
                 return cached_entry
 
         async def _query_providers(search_term: str) -> list[SearchResult]:
@@ -135,6 +206,8 @@ class SearchService:
                 if isinstance(r, Exception):
                     logger.error(f"Provider search error for '{search_term}': {r}")
                     continue
+                if not isinstance(r, list):
+                    continue
                 for item in r:
                     h = item.info_hash.lower()
                     if h not in seen:
@@ -145,6 +218,20 @@ class SearchService:
         # 1. Primary search
         all_results = await _query_providers(q)
         suggestion_used: str | None = None
+
+        # 1b. Hindi recall boost: also query "q hindi" / "q dual audio" and merge,
+        # so Hindi dubs are found even when the base query returns English-only rows.
+        if hindi:
+            seen_hashes = {r.info_hash.lower() for r in all_results}
+            for extra_q in (f"{q} hindi", f"{q} dual audio"):
+                try:
+                    extra = await _query_providers(extra_q)
+                except Exception:
+                    extra = []
+                for r in extra:
+                    if r.info_hash.lower() not in seen_hashes:
+                        seen_hashes.add(r.info_hash.lower())
+                        all_results.append(r)
 
         # 2. Smart fallback if 0 results found
         if not all_results:
@@ -198,6 +285,11 @@ class SearchService:
         else:
             final_results = all_results
 
+        # 4. Hindi/English audio preference (post-health, pre-limit).
+        audio_applied = False
+        if hindi or english:
+            final_results, audio_applied = apply_audio_language_filter(final_results, hindi=hindi, english=english)
+
         final_slice = final_results[:limit]
 
         ret = {
@@ -208,11 +300,12 @@ class SearchService:
             "fallback_applied": fallback_applied,
             "suggestion": suggestion_used,
             "is_cached": False,
+            "audio_filter": {"hindi": hindi, "english": english, "applied": audio_applied},
             "results": [item.to_dict() for item in final_slice],
         }
 
-        # Cache results if any found
-        if total_found > 0 and self.cache_manager:
+        # Cache only unfiltered results (language views are derived, not cached).
+        if total_found > 0 and self.cache_manager and not (hindi or english):
             self.cache_manager.set(
                 query=q,
                 category=cat_enum.value,
@@ -223,4 +316,3 @@ class SearchService:
             )
 
         return ret
-

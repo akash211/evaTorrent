@@ -57,7 +57,8 @@ class Database:
                     completed_at REAL,
                     removed_at REAL,
                     error_message TEXT,
-                    download_dir TEXT
+                    download_dir TEXT,
+                    magnet_uri TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_torrents_history_status ON torrents_history(status);
@@ -76,6 +77,15 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_torrent_events_type ON torrent_events(event_type);
                 """
             )
+            # Lightweight migration for DBs created before magnet_uri existed.
+            try:
+                cols = [r[1] for r in conn.execute("PRAGMA table_info(torrents_history)").fetchall()]
+                if "magnet_uri" not in cols:
+                    conn.execute("ALTER TABLE torrents_history ADD COLUMN magnet_uri TEXT")
+                if "download_dir" not in cols:
+                    conn.execute("ALTER TABLE torrents_history ADD COLUMN download_dir TEXT")
+            except Exception as e:
+                logger.warning(f"DB migration check failed: {e}")
 
     # -------------------------------------------------------------------------
     # OTP Storage
@@ -156,24 +166,40 @@ class Database:
         total_size: int,
         download_dir: str,
         status: str = "downloading",
+        magnet_uri: Optional[str] = None,
     ) -> None:
         """Records addition of a torrent or updates its status on resume."""
         now = time.time()
         info_hash_lower = info_hash.lower()
         with self._get_connection() as conn:
+            # Preserve existing magnet_uri when caller does not provide one.
+            existing_magnet: Optional[str] = None
+            try:
+                cur = conn.execute(
+                    "SELECT magnet_uri FROM torrents_history WHERE info_hash = ?",
+                    (info_hash_lower,),
+                )
+                row = cur.fetchone()
+                if row:
+                    existing_magnet = row["magnet_uri"]
+            except Exception:
+                existing_magnet = None
+            final_magnet = magnet_uri if magnet_uri else existing_magnet
             conn.execute(
                 """
                 INSERT INTO torrents_history (
                     info_hash, name, total_size, downloaded_bytes, uploaded_bytes,
-                    status, added_at, completed_at, removed_at, error_message, download_dir
+                    status, added_at, completed_at, removed_at, error_message, download_dir, magnet_uri
                 )
-                VALUES (?, ?, ?, 0, 0, ?, ?, NULL, NULL, NULL, ?)
+                VALUES (?, ?, ?, 0, 0, ?, ?, NULL, NULL, NULL, ?, ?)
                 ON CONFLICT(info_hash) DO UPDATE SET
                     status = excluded.status,
                     error_message = NULL,
-                    removed_at = NULL
+                    removed_at = NULL,
+                    magnet_uri = COALESCE(excluded.magnet_uri, torrents_history.magnet_uri),
+                    download_dir = COALESCE(excluded.download_dir, torrents_history.download_dir)
                 """,
-                (info_hash_lower, name, total_size, status, now, download_dir),
+                (info_hash_lower, name, total_size, status, now, download_dir, final_magnet),
             )
             conn.execute(
                 """
@@ -349,6 +375,34 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else None
 
+    def set_magnet_uri(self, info_hash: str, magnet_uri: Optional[str]) -> None:
+        """Stores the magnet URI for a torrent so it can be re-resolved after restarts."""
+        if not magnet_uri:
+            return
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE torrents_history SET magnet_uri = ? WHERE info_hash = ?",
+                (magnet_uri, info_hash.lower()),
+            )
+
+    def get_resumable_torrents(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """Returns DB rows that should be present in Live Swarm (survive restarts).
+
+        Includes downloading/pending/paused/error rows. Completed/removed rows
+        are intentionally excluded (completed = no seeding per policy).
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM torrents_history
+                WHERE LOWER(status) IN ('downloading', 'pending', 'paused', 'error', 'seeding')
+                ORDER BY added_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_torrent_events(self, info_hash: str, limit: int = 50) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
             cursor = conn.execute(
@@ -361,7 +415,9 @@ class Database:
         """Calculates global lifetime statistics across all tracked torrents."""
         with self._get_connection() as conn:
             total_count = conn.execute("SELECT COUNT(*) FROM torrents_history").fetchone()[0]
-            completed_count = conn.execute("SELECT COUNT(*) FROM torrents_history WHERE status = 'completed'").fetchone()[0]
+            completed_count = conn.execute(
+                "SELECT COUNT(*) FROM torrents_history WHERE status = 'completed'"
+            ).fetchone()[0]
             removed_count = conn.execute("SELECT COUNT(*) FROM torrents_history WHERE status = 'removed'").fetchone()[0]
             error_count = conn.execute("SELECT COUNT(*) FROM torrents_history WHERE status = 'error'").fetchone()[0]
 

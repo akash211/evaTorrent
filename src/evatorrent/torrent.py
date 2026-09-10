@@ -21,6 +21,7 @@ from evatorrent.bencoding import bdecode, bencode
 @dataclass(frozen=True)
 class FileInfo:
     """Represents a single file within a torrent."""
+
     path: str
     length: int
     offset: int  # Starting byte offset within the torrent payload
@@ -105,9 +106,7 @@ class Torrent:
         if not isinstance(raw_pieces, bytes) or len(raw_pieces) % 20 != 0:
             raise ValueError("Malformed pieces field in info dictionary")
 
-        self.piece_hashes: List[bytes] = [
-            raw_pieces[i : i + 20] for i in range(0, len(raw_pieces), 20)
-        ]
+        self.piece_hashes: List[bytes] = [raw_pieces[i : i + 20] for i in range(0, len(raw_pieces), 20)]
         self.piece_count = len(self.piece_hashes)
 
         # Sanity check total length against piece count
@@ -151,7 +150,7 @@ class Magnet:
         info_hash = None
         for xt in xt_list:
             if xt.startswith("urn:btih:"):
-                raw_hash = xt[len("urn:btih:"):]
+                raw_hash = xt[len("urn:btih:") :]
                 if len(raw_hash) == 40:
                     info_hash = bytes.fromhex(raw_hash)
                 elif len(raw_hash) == 32:
@@ -196,7 +195,9 @@ async def fetch_torrent_from_caches(info_hash_hex: str, timeout: float = 8.0) ->
                         logger.info(f"[CACHE SUCCESS] Found valid .torrent ({len(resp.content)} bytes) via {url}")
                         return resp.content
                     else:
-                        logger.debug(f"[CACHE SKIP] {url} returned 200 OK but content is not a valid bencoded torrent dictionary")
+                        logger.debug(
+                            f"[CACHE SKIP] {url} returned 200 OK but content is not a valid bencoded torrent dictionary"
+                        )
                 except Exception as berr:
                     logger.debug(f"[CACHE SKIP] {url} returned 200 OK but failed bdecode: {berr}")
             elif resp.status_code == 451:
@@ -222,4 +223,3 @@ async def fetch_torrent_from_caches(info_hash_hex: str, timeout: float = 8.0) ->
 
     logger.warning(f"[CACHE EXHAUSTED] Could not retrieve .torrent metainfo for {clean_hash[:8]} from any cache mirror")
     return None
-

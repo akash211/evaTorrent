@@ -23,6 +23,7 @@ def create_sample_torrent_bytes() -> bytes:
 @pytest.mark.asyncio
 async def test_web_endpoints():
     from evatorrent.web.app import auth_config, session_manager
+
     auth_config.set_admin_email("admin@example.com")
     token = session_manager.create_token("admin@example.com")
     headers = {"Authorization": f"Bearer {token}"}
@@ -83,6 +84,7 @@ async def test_web_endpoints():
         # 10. Magnet and /api/torrents/add endpoint
         fake_magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Ubuntu"
         from unittest.mock import AsyncMock, MagicMock, patch
+
         mock_sess = MagicMock()
         mock_sess.torrent.info_hash_hex = "0123456789abcdef0123456789abcdef01234567"
         mock_sess.torrent.name = "Ubuntu"
@@ -95,7 +97,3 @@ async def test_web_endpoints():
             resp = await client.post("/api/torrents/add", json={"magnet": fake_magnet})
             assert resp.status_code == 200
             assert resp.json()["success"] is True
-
-
-
-

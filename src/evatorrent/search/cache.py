@@ -132,24 +132,30 @@ class SearchCacheManager:
 
         # Remove duplicate previous entry for same query+category if present
         index = [
-            item for item in index
-            if not (item.get("query", "").strip().lower() == q_norm and item.get("category", "").strip().lower() == cat_norm)
+            item
+            for item in index
+            if not (
+                item.get("query", "").strip().lower() == q_norm and item.get("category", "").strip().lower() == cat_norm
+            )
         ]
 
         # Insert newest entry at beginning
-        index.insert(0, {
-            "query": query.strip(),
-            "category": cat_norm,
-            "cached_at": now_iso,
-            "cached_timestamp": now,
-            "total_results": total_cnt,
-            "filename": filename,
-        })
+        index.insert(
+            0,
+            {
+                "query": query.strip(),
+                "category": cat_norm,
+                "cached_at": now_iso,
+                "cached_timestamp": now,
+                "total_results": total_cnt,
+                "filename": filename,
+            },
+        )
 
         # Prune if exceeding max_cached (last 100)
         if len(index) > self.max_cached:
-            to_remove = index[self.max_cached:]
-            index = index[:self.max_cached]
+            to_remove = index[self.max_cached :]
+            index = index[: self.max_cached]
             for item in to_remove:
                 old_file = self.cache_dir / item.get("filename", "")
                 if old_file.exists():

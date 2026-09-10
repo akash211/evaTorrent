@@ -76,6 +76,7 @@ search_service = SearchService(cache_manager=search_cache_manager)
 # In-memory IP rate limiter: client_ip -> list of timestamps
 _ip_rate_limits: dict[str, list[float]] = defaultdict(list)
 
+
 def check_ip_rate_limit(request: Request, max_requests: int = 2, window_seconds: float = 60.0) -> None:
     """Enforces max_requests per window_seconds per client IP."""
     client_ip = request.client.host if request.client else "127.0.0.1"
@@ -98,17 +99,24 @@ def check_ip_rate_limit(request: Request, max_requests: int = 2, window_seconds:
     recent.append(now)
     _ip_rate_limits[client_ip] = recent
 
+
 def is_cookie_secure(request: Request) -> bool:
     if os.environ.get("SECURE_COOKIES", "").lower() in ("1", "true", "yes"):
         return True
     proto = request.headers.get("x-forwarded-proto", request.url.scheme).lower()
     return proto == "https"
 
+
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "testserver"}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        summary = await engine_manager.restore_from_db()
+        logger.info(f"[STARTUP] Swarm auto-resume from DB: {summary}")
+    except Exception as e:
+        logger.warning(f"[STARTUP] Auto-resume failed: {e}")
     broadcast_task = asyncio.create_task(telemetry_loop())
     yield
     broadcast_task.cancel()
@@ -124,7 +132,7 @@ async def telemetry_loop():
                 payload = {
                     "type": "telemetry",
                     "stats": engine_manager.get_global_stats(),
-                    "torrents": engine_manager.get_all_torrents(),
+                    "torrents": engine_manager.get_swarm_snapshot(),
                 }
                 await ws_manager.broadcast(payload)
         except asyncio.CancelledError:
@@ -134,6 +142,7 @@ async def telemetry_loop():
 
 
 app = FastAPI(title="evaTorrent API", version=__version__, lifespan=lifespan)
+
 
 @app.middleware("http")
 async def https_enforcement_middleware(request: Request, call_next):
@@ -149,14 +158,23 @@ async def https_enforcement_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
+
 @app.middleware("http")
 async def no_cache_static_middleware(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path.startswith("/static/") or request.url.path in ("/", "/index.html", "/home", "/search", "/report"):
+    if request.url.path.startswith("/static/") or request.url.path in (
+        "/",
+        "/index.html",
+        "/home",
+        "/search",
+        "/discover",
+        "/report",
+    ):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     return response
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -192,6 +210,7 @@ def get_current_user(
 
 # --- Auth Models ---
 
+
 class SetupRequest(BaseModel):
     admin_email: str
     google_client_id: Optional[str] = None
@@ -211,6 +230,7 @@ class GoogleAuthRequest(BaseModel):
 
 
 # --- Auth Endpoints ---
+
 
 @app.get("/api/auth/status")
 async def auth_status(
@@ -355,6 +375,7 @@ async def logout(response: Response):
 
 # --- Analytics & History Endpoints ---
 
+
 @app.get("/api/analysis/summary")
 async def get_analysis_summary(_: str = Depends(get_current_user)):
     """Lifetime summary statistics across all torrents ever processed."""
@@ -381,33 +402,37 @@ async def export_analysis_csv(_: str = Depends(get_current_user)):
     records = database.get_all_history(status_filter="all", limit=50000, offset=0)
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow([
-        "Info Hash",
-        "Name",
-        "Total Size (Bytes)",
-        "Downloaded (Bytes)",
-        "Uploaded (Bytes)",
-        "Status",
-        "Added At (UTC)",
-        "Completed At (UTC)",
-        "Removed At (UTC)",
-        "Error Message",
-        "Download Directory",
-    ])
+    writer.writerow(
+        [
+            "Info Hash",
+            "Name",
+            "Total Size (Bytes)",
+            "Downloaded (Bytes)",
+            "Uploaded (Bytes)",
+            "Status",
+            "Added At (UTC)",
+            "Completed At (UTC)",
+            "Removed At (UTC)",
+            "Error Message",
+            "Download Directory",
+        ]
+    )
     for r in records:
-        writer.writerow([
-            r.get("info_hash", ""),
-            r.get("name", ""),
-            r.get("total_size", 0),
-            r.get("downloaded_bytes", 0),
-            r.get("uploaded_bytes", 0),
-            r.get("status", ""),
-            time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(r["added_at"])) if r.get("added_at") else "",
-            time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(r["completed_at"])) if r.get("completed_at") else "",
-            time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(r["removed_at"])) if r.get("removed_at") else "",
-            r.get("error_message") or "",
-            r.get("download_dir") or "",
-        ])
+        writer.writerow(
+            [
+                r.get("info_hash", ""),
+                r.get("name", ""),
+                r.get("total_size", 0),
+                r.get("downloaded_bytes", 0),
+                r.get("uploaded_bytes", 0),
+                r.get("status", ""),
+                time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["added_at"])) if r.get("added_at") else "",
+                time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["completed_at"])) if r.get("completed_at") else "",
+                time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["removed_at"])) if r.get("removed_at") else "",
+                r.get("error_message") or "",
+                r.get("download_dir") or "",
+            ]
+        )
 
     output.seek(0)
     return StreamingResponse(
@@ -425,6 +450,7 @@ async def get_torrent_events(info_hash: str, _: str = Depends(get_current_user))
 
 # --- Core Web & Torrent Endpoints ---
 
+
 class MagnetRequest(BaseModel):
     magnet: str
 
@@ -436,6 +462,7 @@ class SpeedLimitRequest(BaseModel):
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/home", methods=["GET", "HEAD"])
 @app.api_route("/search", methods=["GET", "HEAD"])
+@app.api_route("/discover", methods=["GET", "HEAD"])
 @app.api_route("/report", methods=["GET", "HEAD"])
 async def serve_index():
     index_file = STATIC_DIR / "index.html"
@@ -451,7 +478,8 @@ async def get_stats(_: str = Depends(get_current_user)):
 
 @app.get("/api/torrents")
 async def list_torrents(_: str = Depends(get_current_user)):
-    return engine_manager.get_all_torrents()
+    # DB-backed swarm: live sessions first, DB fallback rows when memory is empty/stale.
+    return engine_manager.get_swarm_snapshot()
 
 
 @app.post("/api/torrents/upload")
@@ -481,7 +509,9 @@ async def add_magnet(
     logger.info(f"[API] User '{user}' requested adding torrent: {req.magnet[:70]}...")
     try:
         session = await engine_manager.add_torrent_or_url(req.magnet)
-        logger.info(f"[API SUCCESS] Enrolled torrent '{session.torrent.name}' ({session.torrent.info_hash_hex[:8]}) for user '{user}'")
+        logger.info(
+            f"[API SUCCESS] Enrolled torrent '{session.torrent.name}' ({session.torrent.info_hash_hex[:8]}) for user '{user}'"
+        )
         return {
             "success": True,
             "info_hash": session.torrent.info_hash_hex,
@@ -521,7 +551,9 @@ async def download_torrent_file(
     if len(clean_hash) != 40:
         raise HTTPException(status_code=400, detail="Invalid 40-character info hash.")
 
-    logger.info(f"[API] Download .torrent requested for info_hash={clean_hash[:8]} ('{name or ''}') by '{verified_email}'")
+    logger.info(
+        f"[API] Download .torrent requested for info_hash={clean_hash[:8]} ('{name or ''}') by '{verified_email}'"
+    )
     cache_dir = engine_manager.download_dir / ".torrent_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     torrent_file = cache_dir / f"{clean_hash}.torrent"
@@ -572,6 +604,16 @@ async def pause_torrent(
 ):
     success = await engine_manager.pause_torrent(info_hash)
     if not success:
+        # DB-only row (e.g. after restart before rebuild): mark paused in DB.
+        row = database.get_torrent_history(info_hash)
+        if row:
+            database.update_torrent_progress(
+                info_hash,
+                int(row.get("downloaded_bytes") or 0),
+                int(row.get("uploaded_bytes") or 0),
+                "paused",
+            )
+            return {"success": True, "source": "db"}
         raise HTTPException(status_code=404, detail="Torrent not found")
     return {"success": True}
 
@@ -583,7 +625,17 @@ async def resume_torrent(
 ):
     success = engine_manager.resume_torrent(info_hash)
     if not success:
-        raise HTTPException(status_code=404, detail="Torrent not found")
+        # Fallback: rebuild session from DB + cached .torrent (survives restarts).
+        try:
+            rebuilt = await engine_manager.resume_db_torrent(info_hash)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Resume failed: {e}")
+        if not rebuilt:
+            raise HTTPException(
+                status_code=404,
+                detail="Torrent not found in live swarm or database. Re-add the .torrent/magnet.",
+            )
+        return {"success": True, "source": "db", "message": "Session rebuilt from database and resumed."}
     return {"success": True}
 
 
@@ -636,16 +688,18 @@ async def get_torrent_peers(
         raise HTTPException(status_code=404, detail="Torrent not found")
     peers_list = []
     for key, conn in session.active_peers.items():
-        peers_list.append({
-            "key": key,
-            "ip": conn.peer.ip,
-            "port": conn.peer.port,
-            "connected": conn.is_connected,
-            "choked": conn.is_choked,
-            "interested": conn.am_interested,
-            "download_speed": round(conn.download_speed, 2),
-            "bytes_downloaded": conn.bytes_downloaded,
-        })
+        peers_list.append(
+            {
+                "key": key,
+                "ip": conn.peer.ip,
+                "port": conn.peer.port,
+                "connected": conn.is_connected,
+                "choked": conn.is_choked,
+                "interested": conn.am_interested,
+                "download_speed": round(conn.download_speed, 2),
+                "bytes_downloaded": conn.bytes_downloaded,
+            }
+        )
     return {"peers": peers_list}
 
 
@@ -671,7 +725,6 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
         ws_manager.disconnect(websocket)
 
 
-
 @app.get("/api/search")
 async def search_torrents(
     q: str = Query(..., min_length=1, description="Search query string"),
@@ -680,11 +733,15 @@ async def search_torrents(
     limit: int = Query(100, ge=1, le=200),
     timeout: float = Query(30.0, ge=5.0, le=300.0, description="Max search timeout in seconds"),
     refresh: bool = Query(False, description="Bypass cache and force fresh search across indexers"),
+    hindi: bool = Query(False, description="Prefer Hindi / dual-audio results"),
+    english: bool = Query(False, description="Prefer English results"),
     user: str = Depends(get_current_user),
 ):
     """Searches external torrent indexers cleanly with caching and returns ranked results."""
     t0 = time.time()
-    logger.info(f"[SEARCH API] User '{user}' searching '{q}' (cat={category}, refresh={refresh})")
+    logger.info(
+        f"[SEARCH API] User '{user}' searching '{q}' (cat={category}, refresh={refresh}, hindi={hindi}, english={english})"
+    )
     try:
         results = await search_service.search(
             query=q,
@@ -693,20 +750,54 @@ async def search_torrents(
             limit=limit,
             timeout=timeout,
             refresh=refresh,
+            hindi=hindi,
+            english=english,
         )
         elapsed = round(time.time() - t0, 2)
-        logger.info(f"[SEARCH API] Returned {results.get('returned', 0)} results for '{q}' in {elapsed}s (cached={results.get('is_cached')})")
+        logger.info(
+            f"[SEARCH API] Returned {results.get('returned', 0)} results for '{q}' in {elapsed}s (cached={results.get('is_cached')})"
+        )
         return results
     except Exception as e:
         logger.error(f"[SEARCH API ERROR] Search failed for '{q}': {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {e}")
 
 
+@app.get("/api/discover")
+async def discover_media(
+    q: str = Query(..., min_length=1, description="Movie / show / book / game title"),
+    type: str = Query("all", description="Media type: all, movie, tv, book, game"),
+    limit: int = Query(8, ge=1, le=20),
+    timeout: float = Query(20.0, ge=5.0, le=60.0),
+    _: str = Depends(get_current_user),
+):
+    """Free media-info lookup (no API key required).
+
+    Returns release date, runtime, IMDb/RT ratings + links, Wikipedia page,
+    budget/box-office (when TMDB/OMDb keys are configured), India OTT hints
+    via JustWatch (+accurate TMDB providers when TMDB_API_KEY is set),
+    languages, and an embeddable YouTube trailer.
+    """
+    from evatorrent.metadata import lookup_media
+
+    t0 = time.time()
+    try:
+        data = await lookup_media(query=q, media_type=type, limit=limit, timeout=timeout)
+        data["elapsed_seconds"] = round(time.time() - t0, 2)
+        data["ott_accuracy_note"] = (
+            "India OTT data is approximate (JustWatch search) unless TMDB_API_KEY is configured, "
+            "in which case live TMDB India providers are returned."
+        )
+        return data
+    except Exception as e:
+        logger.error(f"[DISCOVER ERROR] lookup failed for '{q}': {e}")
+        raise HTTPException(status_code=500, detail=f"Discover lookup failed: {e}")
+
+
 @app.get("/api/search/recent")
 async def get_recent_searches(_: str = Depends(get_current_user)):
     """Returns up to 10 recent searches from the persistent search cache."""
     return {"recent_searches": search_cache_manager.get_recent(limit=10)}
-
 
 
 # Mount static files

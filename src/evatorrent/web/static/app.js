@@ -404,7 +404,8 @@ function renderTorrentList() {
       <div class="card-header">
         <div class="card-title-group">
           <span class="status-badge ${t.status}">${t.status}</span>
-          <div class="card-title" title="${t.name}">${t.name}</div>
+          ${t.source === 'db' ? '<span class="cat-tag" title="Restored from database after restart — press Resume to reactivate">💾 saved</span>' : ''}
+          <div class="card-title" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
         </div>
         <div class="card-actions" onclick="event.stopPropagation()">
           <button class="card-btn" title="Set Speed Limit" onclick="promptSpeedLimit('${t.info_hash}')">
@@ -785,18 +786,21 @@ document.addEventListener('DOMContentLoaded', () => {
 const TAB_ROUTES = {
   live: '/home',
   search: '/search',
+  discover: '/discover',
   analytics: '/report',
 };
 
 const TAB_TITLES = {
   live: 'evaTorrent ⚡ | Live Swarm',
   search: 'evaTorrent ⚡ | Torrent Search',
+  discover: 'evaTorrent ⚡ | Discover',
   analytics: 'evaTorrent ⚡ | Swarm Analytics & Report',
 };
 
 function getTabFromPath(pathname) {
   const p = (pathname || window.location.pathname).replace(/\/+$/, '') || '/';
   if (p === '/search') return 'search';
+  if (p === '/discover') return 'discover';
   if (p === '/report') return 'analytics';
   return 'live';
 }
@@ -809,28 +813,34 @@ function switchMainView(view, updateHistory = true) {
   // Desktop navigation tab buttons
   const btnLive = document.getElementById('nav-btn-live');
   const btnSearch = document.getElementById('nav-btn-search');
+  const btnDiscover = document.getElementById('nav-btn-discover');
   const btnAnalytics = document.getElementById('nav-btn-analytics');
 
   // Mobile bottom navigation tab buttons
   const mBtnLive = document.getElementById('mobile-nav-btn-live');
   const mBtnSearch = document.getElementById('mobile-nav-btn-search');
+  const mBtnDiscover = document.getElementById('mobile-nav-btn-discover');
   const mBtnAnalytics = document.getElementById('mobile-nav-btn-analytics');
 
   // View panes
   const paneLive = document.getElementById('view-pane-live');
   const paneSearch = document.getElementById('view-pane-search');
+  const paneDiscover = document.getElementById('view-pane-discover');
   const paneAnalytics = document.getElementById('view-pane-analytics');
 
   if (btnLive) btnLive.classList.toggle('active', view === 'live');
   if (btnSearch) btnSearch.classList.toggle('active', view === 'search');
+  if (btnDiscover) btnDiscover.classList.toggle('active', view === 'discover');
   if (btnAnalytics) btnAnalytics.classList.toggle('active', view === 'analytics');
 
   if (mBtnLive) mBtnLive.classList.toggle('active', view === 'live');
   if (mBtnSearch) mBtnSearch.classList.toggle('active', view === 'search');
+  if (mBtnDiscover) mBtnDiscover.classList.toggle('active', view === 'discover');
   if (mBtnAnalytics) mBtnAnalytics.classList.toggle('active', view === 'analytics');
 
   if (paneLive) paneLive.classList.toggle('hidden', view !== 'live');
   if (paneSearch) paneSearch.classList.toggle('hidden', view !== 'search');
+  if (paneDiscover) paneDiscover.classList.toggle('hidden', view !== 'discover');
   if (paneAnalytics) paneAnalytics.classList.toggle('hidden', view !== 'analytics');
 
   const targetPath = TAB_ROUTES[view] || '/home';
@@ -847,6 +857,8 @@ function switchMainView(view, updateHistory = true) {
   } else if (view === 'search') {
     loadRecentSearches();
     setTimeout(() => document.getElementById('indexer-search-query')?.focus(), 50);
+  } else if (view === 'discover') {
+    setTimeout(() => document.getElementById('discover-search-query')?.focus(), 50);
   }
 }
 
@@ -1152,6 +1164,8 @@ async function executeTorrentSearch(forceRefresh = false) {
 
   lastSearchQuery = query;
   const activeOnly = document.getElementById('search-active-only')?.checked !== false;
+  const hindiOnly = document.getElementById('search-hindi-only')?.checked === true;
+  const englishOnly = document.getElementById('search-english-only')?.checked === true;
   const timeoutSec = parseFloat(document.getElementById('search-timeout-select')?.value || '30');
 
   const progressBox = document.getElementById('search-progress-box');
@@ -1218,6 +1232,8 @@ async function executeTorrentSearch(forceRefresh = false) {
     if (forceRefresh) {
       params.append('refresh', 'true');
     }
+    if (hindiOnly) params.append('hindi', 'true');
+    if (englishOnly) params.append('english', 'true');
 
     const res = await fetch(`/api/search?${params.toString()}`, {
       signal: activeSearchController.signal,
@@ -1301,7 +1317,12 @@ async function executeTorrentSearch(forceRefresh = false) {
 
     if (statusText) {
       const sourceNote = data.is_cached ? ' [Cached]' : '';
-      statusText.textContent = `Found ${data.total_found} torrents (showing ${results.length}) in ${elapsedTotal}s${sourceNote}`;
+      const audio = data.audio_filter || {};
+      let langNote = '';
+      if (audio.hindi && audio.english) langNote = ' • Hindi + English (dual-audio first)';
+      else if (audio.hindi) langNote = ' • 🇮🇳 Hindi / Dual-Audio only';
+      else if (audio.english) langNote = ' • 🇬🇧 English preferred';
+      statusText.textContent = `Found ${data.total_found} torrents (showing ${results.length}) in ${elapsedTotal}s${sourceNote}${langNote}`;
     }
     statusBar?.classList.remove('hidden');
 
@@ -1475,4 +1496,148 @@ async function downloadTorrentFile(infoHash, encodedTitle) {
   } catch (err) {
     showToast('Error retrieving .torrent file: ' + err.message, 'error');
   }
+}
+
+// --- Discover (Just Search) — media info: movies / TV / books / games ---
+
+let currentDiscoverType = 'all';
+
+function selectDiscoverType(dtype) {
+  currentDiscoverType = dtype;
+  document.querySelectorAll('[data-dtype]').forEach(pill => {
+    pill.classList.toggle('active', pill.dataset.dtype === dtype);
+  });
+  const query = document.getElementById('discover-search-query')?.value.trim();
+  if (query) executeDiscoverSearch();
+}
+
+function handleDiscoverSubmit(event) {
+  if (event) event.preventDefault();
+  executeDiscoverSearch();
+}
+
+async function executeDiscoverSearch() {
+  const input = document.getElementById('discover-search-query');
+  const query = input?.value.trim() || '';
+  if (!query) {
+    showToast('Type a movie, show, book or game name', 'info');
+    input?.focus();
+    return;
+  }
+  const statusBar = document.getElementById('discover-status-bar');
+  const statusText = document.getElementById('discover-status-text');
+  const emptyEl = document.getElementById('discover-empty-state');
+  const container = document.getElementById('discover-results-container');
+  const btn = document.getElementById('btn-discover-exec');
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Searching...'; }
+  if (statusBar) statusBar.classList.add('hidden');
+  if (container) { container.classList.add('hidden'); container.innerHTML = ''; }
+  if (emptyEl) emptyEl.innerHTML = '<div class="spinner-sm" style="margin:0 auto;"></div><h3>Looking up...</h3><p>Querying YTS, TVMaze, OpenLibrary & Wikipedia (no key needed).</p>';
+
+  try {
+    const params = new URLSearchParams({ q: query, type: currentDiscoverType, limit: '8' });
+    const res = await fetch(`/api/discover?${params.toString()}`);
+    if (!res.ok) {
+      if (res.status === 401) { checkAuth(); return; }
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Discover lookup failed');
+    }
+    const data = await res.json();
+    renderDiscoverResults(data);
+  } catch (err) {
+    if (emptyEl) emptyEl.innerHTML = `<h3>Discover failed</h3><p>${escapeHtml(err.message || 'Could not fetch metadata.')}</p>`;
+    showToast(err.message || 'Discover failed', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Discover'; }
+  }
+}
+
+function discoverField(label, value) {
+  if (value === null || value === undefined || value === '') return '';
+  return `<div class="discover-field"><span class="discover-label">${label}</span><span class="discover-value">${value}</span></div>`;
+}
+
+function renderDiscoverResults(data) {
+  const statusBar = document.getElementById('discover-status-bar');
+  const statusText = document.getElementById('discover-status-text');
+  const emptyEl = document.getElementById('discover-empty-state');
+  const container = document.getElementById('discover-results-container');
+  const results = data.results || [];
+
+  if (statusText) statusText.textContent = `Found ${data.total_found || 0} result(s) for "${data.query}" in ${data.elapsed_seconds || '?'}s`;
+  if (statusBar) statusBar.classList.remove('hidden');
+
+  if (!results.length) {
+    if (container) container.classList.add('hidden');
+    if (emptyEl) emptyEl.innerHTML = `<h3>No info found for "${escapeHtml(data.query)}"</h3><p>Try a different spelling or pick a media type.</p>`;
+    return;
+  }
+  if (emptyEl) emptyEl.innerHTML = '';
+  if (emptyEl) emptyEl.classList.add('hidden');
+
+  if (container) {
+    container.innerHTML = results.map(item => {
+      const title = escapeHtml(item.title || 'Untitled');
+      const typeTag = escapeHtml((item.type || 'info').toUpperCase());
+      const year = item.year ? escapeHtml(String(item.year)) : '—';
+      const rel = item.release_date ? escapeHtml(String(item.release_date)) : year;
+      const runtime = item.runtime ? escapeHtml(String(item.runtime)) : '—';
+      const genres = (item.genres || []).map(g => `<span class="cat-tag">${escapeHtml(g)}</span>`).join(' ');
+      const langs = (item.languages || []).length ? escapeHtml(item.languages.join(', ')) : '—';
+      const overview = item.overview ? escapeHtml(String(item.overview).slice(0, 600)) : '<em>No summary available.</em>';
+      const poster = item.poster_url ? `<img src="${escapeHtml(item.poster_url)}" alt="poster" class="discover-poster" loading="lazy" onerror="this.style.display='none'"/>` : '<div class="discover-poster discover-poster-fallback">🎬</div>';
+      const imdb = item.imdb_rating !== null && item.imdb_rating !== undefined ? `⭐ ${escapeHtml(String(item.imdb_rating))}` : '—';
+      const rt = item.rotten_tomatoes ? escapeHtml(String(item.rotten_tomatoes)) : '—';
+      const imdbLink = item.imdb_url ? `<a href="${escapeHtml(item.imdb_url)}" target="_blank" rel="noopener">IMDb ↗</a>` : '';
+      const rtLink = item.rottentomatoes_url || item.rotten_tomatoes_url ? `<a href="${escapeHtml(item.rottentomatoes_url || item.rotten_tomatoes_url)}" target="_blank" rel="noopener">Rotten Tomatoes ↗</a>` : '';
+      const wikiLink = item.wiki_url ? `<a href="${escapeHtml(item.wiki_url)}" target="_blank" rel="noopener">Wikipedia ↗</a>` : '';
+      const budget = item.budget_formatted || (item.budget ? '$' + Number(item.budget).toLocaleString() : '—');
+      const box = item.box_office_formatted || (item.revenue_box_office ? escapeHtml(String(item.revenue_box_office)) : '—');
+      const ottList = (item.ott_india || []).length
+        ? (item.ott_india || []).map(o => `<span class="cat-tag">${escapeHtml(o)}</span>`).join(' ')
+        : '<em>Not confirmed — check JustWatch 🇮🇳</em>';
+      const jwLink = item.justwatch_in_url ? `<a href="${escapeHtml(item.justwatch_in_url)}" target="_blank" rel="noopener">JustWatch India ↗</a>` : '';
+      const trailerUrl = item.youtube_trailer_url ? escapeHtml(item.youtube_trailer_url) : '';
+      const trailerEmbed = item.youtube_trailer_embed ? escapeHtml(item.youtube_trailer_embed) : '';
+      const trailerBlock = trailerEmbed
+        ? `<div class="discover-trailer"><iframe src="${trailerEmbed}" title="Trailer" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe><div><a href="${trailerUrl}" target="_blank" rel="noopener">▶ Watch on YouTube ↗</a></div></div>`
+        : '';
+      const torrentBtn = `<button class="btn-download-action" onclick="discoverToTorrentSearch('${encodeURIComponent(item.title)}')">🔍 Find torrents</button>`;
+
+      return `
+      <article class="discover-card">
+        <div class="discover-card-main">
+          ${poster}
+          <div class="discover-info">
+            <div class="discover-title-row"><h3>${title}</h3><span class="cat-tag">${typeTag}</span></div>
+            <div class="discover-meta">${genres}</div>
+            <p class="discover-overview">${overview}</p>
+            <div class="discover-fields">
+              ${discoverField('Released', rel)}
+              ${discoverField('Runtime', runtime)}
+              ${discoverField('Languages', langs)}
+              ${discoverField('IMDb', imdb)}
+              ${discoverField('Rotten Tomatoes', rt)}
+              ${discoverField('Budget', escapeHtml(String(budget)))}
+              ${discoverField('Box office', escapeHtml(String(box)))}
+            </div>
+            <div class="discover-links">${[imdbLink, rtLink, wikiLink, jwLink].filter(Boolean).join(' • ')}</div>
+            <div class="discover-ott"><span class="discover-label">India OTT:</span> ${ottList}</div>
+            <div class="discover-actions">${torrentBtn}</div>
+          </div>
+        </div>
+        ${trailerBlock}
+      </article>`;
+    }).join('');
+    container.classList.remove('hidden');
+  }
+}
+
+function discoverToTorrentSearch(encodedTitle) {
+  const title = decodeURIComponent(encodedTitle);
+  const input = document.getElementById('indexer-search-query');
+  if (input) input.value = title;
+  switchMainView('search');
+  executeTorrentSearch(false);
 }

@@ -124,7 +124,11 @@ class PirateBaySearchProvider(BaseSearchProvider):
                     cat_display = TPB_CAT_NAMES.get(cat_raw, "Other")
                     if category == SearchCategory.MOVIES and "movie" not in cat_display.lower():
                         cat_display = "Movies"
-                    elif category == SearchCategory.SERIES and "series" not in cat_display.lower() and "tv" not in cat_display.lower():
+                    elif (
+                        category == SearchCategory.SERIES
+                        and "series" not in cat_display.lower()
+                        and "tv" not in cat_display.lower()
+                    ):
                         cat_display = "TV / Series"
 
                     added_raw = item.get("added", 0)
@@ -136,7 +140,11 @@ class PirateBaySearchProvider(BaseSearchProvider):
                         pass
 
                     magnet = build_magnet(info_hash, name)
-                    source_link = f"https://thepiratebay.org/description.php?id={item_id}" if item_id and item_id != "0" else f"https://apibay.org/q.php?q={urllib.parse.quote(name)}"
+                    source_link = (
+                        f"https://thepiratebay.org/description.php?id={item_id}"
+                        if item_id and item_id != "0"
+                        else f"https://apibay.org/q.php?q={urllib.parse.quote(name)}"
+                    )
                     direct_torrent_link = f"https://itorrents.net/torrent/{info_hash.upper()}.torrent"
 
                     results.append(

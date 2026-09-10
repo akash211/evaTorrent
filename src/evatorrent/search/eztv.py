@@ -84,7 +84,9 @@ class EztvSearchProvider(BaseSearchProvider):
                 # seeders in <td ...><font color="green">123</font></td>
 
                 # Simplest pattern capturing entire TR to parse locally
-                rows = re.findall(r'<tr name="hover" class="forum_header_border">(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
+                rows = re.findall(
+                    r'<tr name="hover" class="forum_header_border">(.*?)</tr>', html, re.DOTALL | re.IGNORECASE
+                )
 
                 results: list[SearchResult] = []
                 for row in rows:
@@ -93,14 +95,14 @@ class EztvSearchProvider(BaseSearchProvider):
                         continue
                     title = title_match.group(1).strip()
                     # Strip out any inner HTML tags (e.g. bold or font)
-                    title = re.sub(r'<[^>]+>', '', title)
+                    title = re.sub(r"<[^>]+>", "", title)
 
                     magnet_match = re.search(r'href="(magnet:\?[^"]+)"', row, re.IGNORECASE)
                     if not magnet_match:
                         continue
                     magnet_uri = magnet_match.group(1)
 
-                    hash_match = re.search(r'urn:btih:([a-fA-F0-9]{40})', magnet_uri, re.IGNORECASE)
+                    hash_match = re.search(r"urn:btih:([a-fA-F0-9]{40})", magnet_uri, re.IGNORECASE)
                     if not hash_match:
                         continue
                     info_hash = hash_match.group(1).lower()
@@ -114,7 +116,7 @@ class EztvSearchProvider(BaseSearchProvider):
                     seeder_match = re.search(r'<font color="green">([\d,]+)</font>', row, re.IGNORECASE)
                     if seeder_match:
                         try:
-                            seeders = int(seeder_match.group(1).replace(',', ''))
+                            seeders = int(seeder_match.group(1).replace(",", ""))
                         except ValueError:
                             pass
 
@@ -125,7 +127,7 @@ class EztvSearchProvider(BaseSearchProvider):
                     size_disp = ""
                     # Size is usually in a td next to seeders, but let's try a heuristic
                     # look for something like 1.2 GB or 500 MB
-                    size_match = re.search(r'>\s*([\d.]+\s*[KMGT]B)\s*<', row, re.IGNORECASE)
+                    size_match = re.search(r">\s*([\d.]+\s*[KMGT]B)\s*<", row, re.IGNORECASE)
                     if size_match:
                         size_disp = size_match.group(1).strip()
                         size_bytes = parse_size_to_bytes(size_disp)
@@ -134,7 +136,7 @@ class EztvSearchProvider(BaseSearchProvider):
                     source_match = re.search(r'<a href="([^"]+)"[^>]*class="epinfo"', row, re.IGNORECASE)
                     if source_match:
                         source_url = source_match.group(1)
-                        if source_url.startswith('/'):
+                        if source_url.startswith("/"):
                             source_url = f"{self.BASE_URL}{source_url}"
 
                     magnet = build_magnet(info_hash, title)

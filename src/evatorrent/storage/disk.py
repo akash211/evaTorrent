@@ -76,9 +76,7 @@ class DiskWriter:
                 bytes_written += len(slice_to_write)
 
         if bytes_written != len(data):
-            logger.warning(
-                f"Piece {piece_index}: Expected to write {len(data)} bytes, wrote {bytes_written}"
-            )
+            logger.warning(f"Piece {piece_index}: Expected to write {len(data)} bytes, wrote {bytes_written}")
 
     def finalize(self) -> None:
         """Renames all .part files to their final filenames once download is verified."""

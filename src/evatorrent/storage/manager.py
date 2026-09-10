@@ -85,7 +85,7 @@ class PieceManager:
         for idx in self.completed_pieces:
             byte_idx = idx // 8
             bit_idx = 7 - (idx % 8)
-            buf[byte_idx] |= (1 << bit_idx)
+            buf[byte_idx] |= 1 << bit_idx
         return Bitfield(bytes(buf))
 
     def peer_has_all_pieces(self, peer_key: str) -> None:
@@ -188,17 +188,17 @@ class PieceManager:
             key=_availability,
         )
         for piece_idx in rarest_missing:
-                self.missing_pieces.remove(piece_idx)
-                self.ongoing_pieces.add(piece_idx)
-                piece = self.pieces[piece_idx]
-                for block in piece.blocks:
-                    if not block.is_complete and block.requested_time == 0.0:
-                        block.mark_requested()
-                        blocks_to_request.append(block)
-                        if len(blocks_to_request) >= max_count:
-                            return blocks_to_request
-                if len(blocks_to_request) >= max_count:
-                    break
+            self.missing_pieces.remove(piece_idx)
+            self.ongoing_pieces.add(piece_idx)
+            piece = self.pieces[piece_idx]
+            for block in piece.blocks:
+                if not block.is_complete and block.requested_time == 0.0:
+                    block.mark_requested()
+                    blocks_to_request.append(block)
+                    if len(blocks_to_request) >= max_count:
+                        return blocks_to_request
+            if len(blocks_to_request) >= max_count:
+                break
 
         return blocks_to_request
 

@@ -2487,3 +2487,85 @@ button, input, select, a, .cat-pill, .filter-tab, .recent-chip {
     font-size: 0.72rem;
   }
 }
+
+/* --- Discover (Just Search) cards --- */
+.discover-hint {
+  margin-top: 10px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.discover-hint code {
+  background: var(--bg-surface);
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+.discover-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+}
+.discover-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  backdrop-filter: blur(12px);
+}
+.discover-card-main {
+  display: flex;
+  gap: 14px;
+}
+.discover-poster {
+  width: 110px;
+  height: 160px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+.discover-poster-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  background: var(--bg-surface);
+}
+.discover-info { flex: 1; min-width: 0; }
+.discover-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.discover-title-row h3 { margin: 0; font-size: 1.05rem; }
+.discover-meta { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+.discover-overview { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.45; }
+.discover-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+  margin: 10px 0;
+}
+.discover-field { display: flex; flex-direction: column; gap: 2px; }
+.discover-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.discover-value { font-size: 0.85rem; color: var(--text-primary); font-weight: 500; }
+.discover-links { font-size: 0.82rem; margin: 6px 0; }
+.discover-links a { color: var(--accent-cyan); text-decoration: none; }
+.discover-ott { font-size: 0.82rem; margin: 6px 0; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.discover-actions { margin-top: 8px; }
+.discover-trailer { margin-top: 12px; }
+.discover-trailer iframe {
+  width: 100%;
+  height: 220px;
+  border: 0;
+  border-radius: 10px;
+  background: #000;
+}
+.discover-trailer a { font-size: 0.82rem; color: var(--accent-cyan); }
+@media (max-width: 520px) {
+  .discover-card-main { flex-direction: column; }
+  .discover-poster { width: 100%; height: 200px; }
+  .discover-fields { grid-template-columns: 1fr; }
+}
