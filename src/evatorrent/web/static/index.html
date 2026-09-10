@@ -2,14 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d14">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>evaTorrent ⚡ | Next-Gen BitTorrent Engine</title>
   <!-- Fonts & Google Identity Services -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="/static/style.css?v=0.5.0" />
+  <link rel="stylesheet" href="/static/style.css?v=0.6.0" />
 </head>
 <body>
   <div class="app-container">
@@ -71,8 +75,25 @@
           </svg>
           Add Torrent
         </button>
-      </div>
     </header>
+
+    <!-- Mobile Live Stats Strip (visible on mobile / tablet) -->
+    <div class="mobile-stats-strip" id="mobile-stats-strip">
+      <div class="mobile-stat-pill">
+        <span class="stat-indicator pulse-cyan"></span>
+        <span class="stat-label">DL:</span>
+        <span class="stat-value" id="mobile-dl-speed">0.00 KB/s</span>
+      </div>
+      <div class="mobile-stat-pill">
+        <span class="stat-indicator pulse-purple"></span>
+        <span class="stat-label">UL:</span>
+        <span class="stat-value" id="mobile-ul-speed">0.00 KB/s</span>
+      </div>
+      <div class="mobile-stat-pill">
+        <span class="stat-label">Active:</span>
+        <span class="stat-value highlight" id="mobile-active-torrents">0</span>
+      </div>
+    </div>
 
     <!-- Main Content Area -->
     <main class="main-layout">
@@ -569,8 +590,30 @@
 
     <!-- Toast Notifications -->
     <div id="toast-container" class="toast-container"></div>
+
+    <!-- Mobile Bottom Navigation Bar (FHD+ Android & iOS/iPad friendly) -->
+    <nav class="mobile-bottom-nav" id="mobile-bottom-nav" aria-label="Mobile Navigation">
+      <button id="mobile-nav-btn-live" class="mobile-nav-tab active" onclick="switchMainView('live')" title="Live Swarm (/home)">
+        <div class="mobile-tab-icon-wrap">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </div>
+        <span class="mobile-tab-label">Swarm</span>
+      </button>
+      <button id="mobile-nav-btn-search" class="mobile-nav-tab" onclick="switchMainView('search')" title="Torrent Search (/search)">
+        <div class="mobile-tab-icon-wrap">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </div>
+        <span class="mobile-tab-label">Search</span>
+      </button>
+      <button id="mobile-nav-btn-analytics" class="mobile-nav-tab" onclick="switchMainView('analytics')" title="Swarm Analytics & Report (/report)">
+        <div class="mobile-tab-icon-wrap">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        </div>
+        <span class="mobile-tab-label">Report</span>
+      </button>
+    </nav>
   </div>
 
-  <script src="/static/app.js?v=0.5.0"></script>
+  <script src="/static/app.js?v=0.6.0"></script>
 </body>
 </html>

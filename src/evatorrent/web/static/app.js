@@ -337,9 +337,23 @@ function connectWebSocket() {
 // Global Stats
 function updateGlobalStats(stats) {
   if (!stats) return;
-  document.getElementById('global-dl-speed').textContent = formatSpeed(stats.total_download_speed);
-  document.getElementById('global-ul-speed').textContent = formatSpeed(stats.total_upload_speed);
-  document.getElementById('global-active-torrents').textContent = stats.active_torrents;
+  const dlStr = formatSpeed(stats.total_download_speed);
+  const ulStr = formatSpeed(stats.total_upload_speed);
+  const countStr = String(stats.active_torrents || 0);
+
+  const dlEl = document.getElementById('global-dl-speed');
+  const ulEl = document.getElementById('global-ul-speed');
+  const actEl = document.getElementById('global-active-torrents');
+  if (dlEl) dlEl.textContent = dlStr;
+  if (ulEl) ulEl.textContent = ulStr;
+  if (actEl) actEl.textContent = countStr;
+
+  const mDlEl = document.getElementById('mobile-dl-speed');
+  const mUlEl = document.getElementById('mobile-ul-speed');
+  const mActEl = document.getElementById('mobile-active-torrents');
+  if (mDlEl) mDlEl.textContent = dlStr;
+  if (mUlEl) mUlEl.textContent = ulStr;
+  if (mActEl) mActEl.textContent = countStr;
 }
 
 // Update Torrents & Render List
@@ -756,17 +770,53 @@ document.addEventListener('DOMContentLoaded', () => {
       uploadFile(e.dataTransfer.files[0]);
     }
   });
+
+  // Initialize view routing based on URL path (/home, /search, /report)
+  const initialView = getTabFromPath(window.location.pathname);
+  switchMainView(initialView, false);
+  const targetCanonical = TAB_ROUTES[initialView] || '/home';
+  if (window.location.pathname !== targetCanonical) {
+    window.history.replaceState({ view: initialView }, '', targetCanonical);
+  }
 });
 
-// --- View Switching (Live Swarm vs Swarm Analytics) ---
+// --- View Switching & URL Routing (/home, /search, /report) ---
+
+const TAB_ROUTES = {
+  live: '/home',
+  search: '/search',
+  analytics: '/report',
+};
+
+const TAB_TITLES = {
+  live: 'evaTorrent ⚡ | Live Swarm',
+  search: 'evaTorrent ⚡ | Torrent Search',
+  analytics: 'evaTorrent ⚡ | Swarm Analytics & Report',
+};
+
+function getTabFromPath(pathname) {
+  const p = (pathname || window.location.pathname).replace(/\/+$/, '') || '/';
+  if (p === '/search') return 'search';
+  if (p === '/report') return 'analytics';
+  return 'live';
+}
 
 let currentMainView = 'live';
 
-function switchMainView(view) {
+function switchMainView(view, updateHistory = true) {
   currentMainView = view;
+
+  // Desktop navigation tab buttons
   const btnLive = document.getElementById('nav-btn-live');
   const btnSearch = document.getElementById('nav-btn-search');
   const btnAnalytics = document.getElementById('nav-btn-analytics');
+
+  // Mobile bottom navigation tab buttons
+  const mBtnLive = document.getElementById('mobile-nav-btn-live');
+  const mBtnSearch = document.getElementById('mobile-nav-btn-search');
+  const mBtnAnalytics = document.getElementById('mobile-nav-btn-analytics');
+
+  // View panes
   const paneLive = document.getElementById('view-pane-live');
   const paneSearch = document.getElementById('view-pane-search');
   const paneAnalytics = document.getElementById('view-pane-analytics');
@@ -775,9 +825,22 @@ function switchMainView(view) {
   if (btnSearch) btnSearch.classList.toggle('active', view === 'search');
   if (btnAnalytics) btnAnalytics.classList.toggle('active', view === 'analytics');
 
+  if (mBtnLive) mBtnLive.classList.toggle('active', view === 'live');
+  if (mBtnSearch) mBtnSearch.classList.toggle('active', view === 'search');
+  if (mBtnAnalytics) mBtnAnalytics.classList.toggle('active', view === 'analytics');
+
   if (paneLive) paneLive.classList.toggle('hidden', view !== 'live');
   if (paneSearch) paneSearch.classList.toggle('hidden', view !== 'search');
   if (paneAnalytics) paneAnalytics.classList.toggle('hidden', view !== 'analytics');
+
+  const targetPath = TAB_ROUTES[view] || '/home';
+  if (updateHistory && window.location.pathname !== targetPath) {
+    window.history.pushState({ view }, '', targetPath);
+  }
+
+  if (TAB_TITLES[view]) {
+    document.title = TAB_TITLES[view];
+  }
 
   if (view === 'analytics') {
     loadAnalyticsData();
@@ -786,6 +849,12 @@ function switchMainView(view) {
     setTimeout(() => document.getElementById('indexer-search-query')?.focus(), 50);
   }
 }
+
+// Window popstate event for native browser Back/Forward buttons
+window.addEventListener('popstate', (event) => {
+  const view = (event.state && event.state.view) || getTabFromPath(window.location.pathname);
+  switchMainView(view, false);
+});
 
 // --- Swarm Analytics Archive & Reporting ---
 

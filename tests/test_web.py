@@ -29,10 +29,11 @@ async def test_web_endpoints():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver", headers=headers) as client:
-        # 1. Index page (public)
-        resp = await client.get("/")
-        assert resp.status_code == 200
-        assert "evaTorrent" in resp.text
+        # 1. Index & Tab Pages (public routes: /, /home, /search, /report)
+        for path in ("/", "/home", "/search", "/report"):
+            resp = await client.get(path)
+            assert resp.status_code == 200
+            assert "evaTorrent" in resp.text
 
         # 2. Stats
         resp = await client.get("/api/stats")
