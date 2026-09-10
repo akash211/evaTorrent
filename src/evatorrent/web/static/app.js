@@ -1566,7 +1566,22 @@ function renderDiscoverResults(data) {
   const statusText = document.getElementById('discover-status-text');
   const emptyEl = document.getElementById('discover-empty-state');
   const container = document.getElementById('discover-results-container');
+  const keyHint = document.getElementById('discover-key-hint');
   const results = data.results || [];
+
+  // Key hint: hide when both enrichment keys are live server-side.
+  if (keyHint) {
+    const keys = data.keys_configured || {};
+    const missing = [];
+    if (!keys.tmdb) missing.push('<code>TMDB_API_KEY</code>');
+    if (!keys.omdb) missing.push('<code>OMDB_API_KEY</code>');
+    if (missing.length === 0) {
+      keyHint.classList.add('hidden');
+    } else {
+      keyHint.classList.remove('hidden');
+      keyHint.innerHTML = `No API key needed. Set ${missing.join(' / ')} on the server for accurate budget, box-office & India OTT providers.`;
+    }
+  }
 
   if (statusText) statusText.textContent = `Found ${data.total_found || 0} result(s) for "${data.query}" in ${data.elapsed_seconds || '?'}s`;
   if (statusBar) statusBar.classList.remove('hidden');

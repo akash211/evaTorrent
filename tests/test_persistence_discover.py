@@ -226,3 +226,116 @@ async def test_web_swarm_fallback_and_discover_routes():
             resp = await client.get("/api/search", params={"q": "dune", "hindi": "true"})
             assert resp.status_code == 200
             assert ms.call_args.kwargs.get("hindi") is True
+
+
+def test_title_similarity_exact_first():
+    from evatorrent.metadata.service import title_similarity
+
+    assert title_similarity("Dhurandhar", "Dhurandhar") == 1.0
+    assert title_similarity("dhurandhar", "Dhurandhar (film)") > 0.85
+    assert title_similarity("Dhurandhar", "Dhurandhar") > title_similarity("Dhurandhar", "Something Else Entirely")
+
+
+@pytest.mark.asyncio
+async def test_discover_keys_flag_and_ranking(monkeypatch):
+    from evatorrent.metadata import lookup_media
+    from evatorrent.metadata import service as md
+
+    monkeypatch.delenv("TMDB_API_KEY", raising=False)
+    monkeypatch.delenv("OMDB_API_KEY", raising=False)
+
+    async def fake_yts(client, query, limit=6):
+        base = {
+            "release_date": "2001",
+            "runtime": "90 min",
+            "runtime_mins": 90,
+            "genres": [],
+            "languages": ["English"],
+            "overview": "",
+            "poster_url": None,
+            "imdb_id": None,
+            "imdb_url": "https://www.imdb.com/find?q=x",
+            "rotten_tomatoes": None,
+            "rotten_tomatoes_url": "https://x",
+            "wiki_url": "https://x",
+            "budget": None,
+            "revenue_box_office": None,
+            "ott_india": [],
+            "justwatch_in_url": "https://x",
+            "ott_note": "n",
+            "youtube_trailer_url": "https://x",
+            "youtube_trailer_embed": "https://x",
+            "provider": "YTS",
+            "source_url": "https://yts.mx",
+            "type": "movie",
+        }
+        return [
+            {**base, "title": "Random Unrelated Film", "year": 2001, "imdb_rating": 9.5},
+            {**base, "title": "Dhurandhar", "year": 2025, "imdb_rating": 5.0, "languages": ["Hindi"]},
+        ]
+
+    monkeypatch.setattr(md, "search_yts", fake_yts)
+    monkeypatch.setattr(md, "search_tvmaze", AsyncMock(return_value=[]))
+    monkeypatch.setattr(md, "search_openlibrary", AsyncMock(return_value=[]))
+    monkeypatch.setattr(md, "search_wikipedia", AsyncMock(return_value=[]))
+
+    data = await lookup_media("Dhurandhar", media_type="movie", limit=5, timeout=5.0)
+    assert data["keys_configured"] == {"tmdb": False, "omdb": False}
+    # Exact title wins despite lower rating.
+    assert data["results"][0]["title"] == "Dhurandhar"
+
+
+@pytest.mark.asyncio
+async def test_discover_tmdb_omdb_providers(monkeypatch):
+    from evatorrent.metadata import lookup_media
+    from evatorrent.metadata import service as md
+
+    monkeypatch.setenv("TMDB_API_KEY", "dummy")
+    monkeypatch.setenv("OMDB_API_KEY", "dummy")
+
+    async def fake_tmdb(client, query, limit=6):
+        return [
+            {
+                "type": "movie",
+                "title": "Dhurandhar",
+                "year": 2025,
+                "release_date": "2025-12-05",
+                "runtime_mins": None,
+                "runtime": None,
+                "genres": [],
+                "languages": ["hi"],
+                "overview": "Spy epic",
+                "poster_url": None,
+                "imdb_id": None,
+                "imdb_url": "https://x",
+                "imdb_rating": 7.5,
+                "rotten_tomatoes": None,
+                "rotten_tomatoes_url": "https://x",
+                "wiki_url": None,
+                "budget": None,
+                "revenue_box_office": None,
+                "ott_india": [],
+                "tmdb_id": 999,
+                "tmdb_kind": "movie",
+                "justwatch_in_url": "https://x",
+                "ott_note": "n",
+                "youtube_trailer_url": "https://x",
+                "youtube_trailer_embed": "https://x",
+                "provider": "TMDB",
+                "source_url": "https://www.themoviedb.org/movie/999",
+            }
+        ]
+
+    monkeypatch.setattr(md, "search_tmdb", fake_tmdb)
+    monkeypatch.setattr(md, "search_omdb_exact", AsyncMock(return_value=[]))
+    monkeypatch.setattr(md, "search_yts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(md, "search_tvmaze", AsyncMock(return_value=[]))
+    monkeypatch.setattr(md, "search_openlibrary", AsyncMock(return_value=[]))
+    monkeypatch.setattr(md, "search_wikipedia", AsyncMock(return_value=[]))
+    monkeypatch.setattr(md, "enrich_with_tmdb", AsyncMock(side_effect=lambda c, it: it))
+    monkeypatch.setattr(md, "enrich_with_omdb", AsyncMock(side_effect=lambda c, it: it))
+
+    data = await lookup_media("Dhurandhar", media_type="all", limit=5, timeout=5.0)
+    assert data["keys_configured"] == {"tmdb": True, "omdb": True}
+    assert data["results"][0]["provider"] == "TMDB"
+    assert data["results"][0]["title"] == "Dhurandhar"

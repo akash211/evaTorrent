@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import html
 import logging
 import os
@@ -14,8 +15,32 @@ import httpx
 
 logger = logging.getLogger("evatorrent.metadata")
 
-UA = {"User-Agent": "evaTorrent/0.7.1 (Discover metadata lookup)"}
+UA = {"User-Agent": "evaTorrent/0.7.2 (Discover metadata lookup)"}
 DEFAULT_TIMEOUT = 10.0
+
+
+def keys_configured() -> Dict[str, bool]:
+    """Reports which optional enrichment keys exist (booleans only, never values)."""
+    return {
+        "tmdb": bool(os.environ.get("TMDB_API_KEY", "").strip()),
+        "omdb": bool(os.environ.get("OMDB_API_KEY", "").strip()),
+    }
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def title_similarity(query: str, title: str) -> float:
+    """0..1 similarity favoring exact/substring title matches over fuzzy provider junk."""
+    nq, nt = _norm(query), _norm(title)
+    if not nq or not nt:
+        return 0.0
+    if nq == nt:
+        return 1.0
+    if nq in nt or nt in nq:
+        return 0.9
+    return difflib.SequenceMatcher(None, nq, nt).ratio()
 
 
 def _clean_html(text: str) -> str:
@@ -252,28 +277,151 @@ async def search_wikipedia(client: httpx.AsyncClient, query: str, limit: int = 4
     return out
 
 
+async def search_tmdb(client: httpx.AsyncClient, query: str, limit: int = 6) -> List[Dict[str, Any]]:
+    """Movies + TV via TMDB search (needs TMDB_API_KEY). Best exact-title matcher available."""
+    api_key = os.environ.get("TMDB_API_KEY", "").strip()
+    if not api_key:
+        return []
+    out: List[Dict[str, Any]] = []
+    for kind in ("movie", "tv"):
+        data = await _get_json(
+            client,
+            f"https://api.themoviedb.org/3/search/{kind}",
+            {"api_key": api_key, "query": query, "include_adult": "false"},
+        )
+        results = ((data or {}).get("results", [])) if isinstance(data, dict) else []
+        # TMDB orders by popularity — re-rank by title similarity so the exact film wins.
+        scored = sorted(
+            results, key=lambda r: title_similarity(query, str(r.get("title") or r.get("name") or "")), reverse=True
+        )
+        for r in scored[:limit]:
+            title = r.get("title") or r.get("name") or query
+            date_str = r.get("release_date") or r.get("first_air_date") or ""
+            year = int(date_str[:4]) if len(date_str) >= 4 and date_str[:4].isdigit() else None
+            yt = youtube_links(title, year)
+            jw = justwatch_links(title)
+            out.append(
+                {
+                    "type": "movie" if kind == "movie" else "tv",
+                    "title": title,
+                    "year": year,
+                    "release_date": date_str or None,
+                    "runtime_mins": None,
+                    "runtime": None,
+                    "genres": [],
+                    "languages": [r.get("original_language")] if r.get("original_language") else [],
+                    "overview": r.get("overview") or "",
+                    "poster_url": f"https://image.tmdb.org/t/p/w500{r['poster_path']}"
+                    if r.get("poster_path")
+                    else None,
+                    "imdb_id": None,
+                    "imdb_url": f"https://www.imdb.com/find?q={quote_plus(title)}",
+                    "imdb_rating": r.get("vote_average") or None,
+                    "rotten_tomatoes": None,
+                    "rotten_tomatoes_url": f"https://www.rottentomatoes.com/search?search={quote_plus(title)}",
+                    "wiki_url": None,
+                    "budget": None,
+                    "revenue_box_office": None,
+                    "ott_india": [],
+                    "tmdb_id": r.get("id"),
+                    "tmdb_kind": kind,
+                    **jw,
+                    **yt,
+                    "provider": "TMDB",
+                    "source_url": f"https://www.themoviedb.org/{kind}/{r.get('id')}"
+                    if r.get("id")
+                    else "https://www.themoviedb.org",
+                }
+            )
+    return out
+
+
+async def search_omdb_exact(client: httpx.AsyncClient, query: str) -> List[Dict[str, Any]]:
+    """Exact title lookup via OMDb (needs OMDB_API_KEY). One precise hit, not a fuzzy list."""
+    api_key = os.environ.get("OMDB_API_KEY", "").strip()
+    if not api_key:
+        return []
+    data = await _get_json(client, "https://www.omdbapi.com/", {"apikey": api_key, "t": query.strip()})
+    if not isinstance(data, dict) or str(data.get("Response")).lower() != "true":
+        return []
+    title = data.get("Title") or query
+    year_raw = str(data.get("Year") or "")
+    year = int(year_raw[:4]) if len(year_raw) >= 4 and year_raw[:4].isdigit() else None
+    rt = next((r.get("Value") for r in data.get("Ratings") or [] if r.get("Source") == "Rotten Tomatoes"), None)
+    try:
+        imdb_rating = float(data["imdbRating"]) if data.get("imdbRating") not in (None, "N/A") else None
+    except (ValueError, TypeError):
+        imdb_rating = None
+    poster = data.get("Poster") if data.get("Poster") not in (None, "N/A") else None
+    box = data.get("BoxOffice") if data.get("BoxOffice") not in (None, "N/A") else None
+    yt = youtube_links(title, year)
+    jw = justwatch_links(title)
+    mtype = "tv" if str(data.get("Type", "")).lower() == "series" else "movie"
+    return [
+        {
+            "type": mtype,
+            "title": title,
+            "year": year,
+            "release_date": data.get("Released") if data.get("Released") != "N/A" else None,
+            "runtime_mins": None,
+            "runtime": data.get("Runtime") if data.get("Runtime") != "N/A" else None,
+            "genres": [g.strip() for g in str(data.get("Genre", "")).split(",") if g.strip()] or [],
+            "languages": [part.strip() for part in str(data.get("Language", "")).split(",") if part.strip()] or [],
+            "overview": data.get("Plot") if data.get("Plot") != "N/A" else "",
+            "poster_url": poster,
+            "imdb_id": data.get("imdbID"),
+            "imdb_url": f"https://www.imdb.com/title/{data['imdbID']}/"
+            if data.get("imdbID")
+            else f"https://www.imdb.com/find?q={quote_plus(title)}",
+            "imdb_rating": imdb_rating,
+            "rotten_tomatoes": rt,
+            "rotten_tomatoes_url": f"https://www.rottentomatoes.com/search?search={quote_plus(title)}",
+            "wiki_url": None,
+            "budget": None,
+            "revenue_box_office": box,
+            "box_office_formatted": box,
+            "ott_india": [],
+            "director": data.get("Director"),
+            "actors": data.get("Actors"),
+            **jw,
+            **yt,
+            "provider": "OMDb",
+            "source_url": f"https://www.imdb.com/title/{data['imdbID']}/"
+            if data.get("imdbID")
+            else "https://www.omdbapi.com",
+        }
+    ]
+
+
 async def enrich_with_tmdb(client: httpx.AsyncClient, item: Dict[str, Any]) -> Dict[str, Any]:
     """Adds budget/revenue + India OTT providers when TMDB_API_KEY is set."""
     api_key = os.environ.get("TMDB_API_KEY", "").strip()
     if not api_key or item.get("type") not in ("movie", "tv"):
         return item
     try:
-        kind = "movie" if item["type"] == "movie" else "tv"
-        search = await _get_json(
-            client,
-            f"https://api.themoviedb.org/3/search/{kind}",
-            {"api_key": api_key, "query": item.get("title", ""), "include_adult": "false"},
-        )
-        results = ((search or {}).get("results", [])) if isinstance(search, dict) else []
-        if not results:
-            return item
-        best = results[0]
-        tmdb_id = best.get("id")
-        if item.get("type") == "movie":
-            item["imdb_rating"] = item.get("imdb_rating") or best.get("vote_average")
-            item["poster_url"] = item.get("poster_url") or (
-                f"https://image.tmdb.org/t/p/w500{best.get('poster_path')}" if best.get("poster_path") else None
+        kind = str(item.get("tmdb_kind") or ("movie" if item["type"] == "movie" else "tv"))
+        tmdb_id = item.get("tmdb_id")
+        if not tmdb_id:
+            search = await _get_json(
+                client,
+                f"https://api.themoviedb.org/3/search/{kind}",
+                {"api_key": api_key, "query": item.get("title", ""), "include_adult": "false"},
             )
+            results = ((search or {}).get("results", [])) if isinstance(search, dict) else []
+            if not results:
+                return item
+            best = max(
+                results,
+                key=lambda r: title_similarity(str(item.get("title", "")), str(r.get("title") or r.get("name") or "")),
+            )
+            tmdb_id = best.get("id")
+            item["tmdb_id"] = tmdb_id
+            item["tmdb_kind"] = kind
+            if item.get("type") == "movie":
+                item["imdb_rating"] = item.get("imdb_rating") or best.get("vote_average")
+                item["poster_url"] = item.get("poster_url") or (
+                    f"https://image.tmdb.org/t/p/w500{best.get('poster_path')}" if best.get("poster_path") else None
+                )
         detail = await _get_json(client, f"https://api.themoviedb.org/3/{kind}/{tmdb_id}", {"api_key": api_key}) or {}
         if detail.get("budget"):
             item["budget"] = detail["budget"]
@@ -283,9 +431,12 @@ async def enrich_with_tmdb(client: httpx.AsyncClient, item: Dict[str, Any]) -> D
             item["box_office_formatted"] = f"${detail['revenue']:,}"
         if detail.get("overview") and not item.get("overview"):
             item["overview"] = detail["overview"]
-        if detail.get("runtime"):
-            item["runtime_mins"] = detail["runtime"]
-            item["runtime"] = f"{detail['runtime']} min"
+        runtime_val = detail.get("runtime") or ((detail.get("episode_run_time") or [None])[0])
+        if runtime_val:
+            item["runtime_mins"] = runtime_val
+            item["runtime"] = f"{runtime_val} min" + (" / ep" if kind == "tv" else "")
+        if not item.get("network") and detail.get("networks"):
+            item["network"] = (detail["networks"][0] or {}).get("name")
         if detail.get("spoken_languages"):
             item["languages"] = [
                 lang.get("english_name") or lang.get("name")
@@ -379,8 +530,9 @@ MEDIA_TYPES = ("movie", "tv", "book", "game", "all")
 async def lookup_media(query: str, media_type: str = "all", limit: int = 8, timeout: float = 15.0) -> Dict[str, Any]:
     """Main Discover lookup — parallel free providers, optional TMDB/OMDb enrichment."""
     q = (query or "").strip()
+    keys = keys_configured()
     if not q:
-        return {"query": q, "type": media_type, "total_found": 0, "results": []}
+        return {"query": q, "type": media_type, "total_found": 0, "results": [], "keys_configured": keys}
     mt = (media_type or "all").lower()
     if mt in ("series", "show", "shows"):
         mt = "tv"
@@ -391,6 +543,10 @@ async def lookup_media(query: str, media_type: str = "all", limit: int = 8, time
     try:
         async with httpx.AsyncClient(headers=UA, timeout=timeout, follow_redirects=True) as client:
             tasks = []
+            if keys["tmdb"] and mt in ("movie", "tv", "all"):
+                tasks.append(search_tmdb(client, q, limit=6))
+            if keys["omdb"] and mt in ("movie", "tv", "all"):
+                tasks.append(search_omdb_exact(client, q))
             if mt in ("movie", "all"):
                 tasks.append(search_yts(client, q, limit=6))
             if mt in ("tv", "all"):
@@ -416,9 +572,9 @@ async def lookup_media(query: str, media_type: str = "all", limit: int = 8, time
                 enrich_tasks.append(enrich_wiki_url(client, item))
             if enrich_tasks:
                 await asyncio.gather(*enrich_tasks, return_exceptions=True)
-            if os.environ.get("TMDB_API_KEY"):
+            if keys["tmdb"]:
                 await asyncio.gather(*[enrich_with_tmdb(client, it) for it in results[:4]], return_exceptions=True)
-            if os.environ.get("OMDB_API_KEY"):
+            if keys["omdb"]:
                 await asyncio.gather(*[enrich_with_omdb(client, it) for it in results[:4]], return_exceptions=True)
     except Exception as e:
         logger.warning(f"Discover lookup failed for '{q}': {e}")
@@ -432,7 +588,7 @@ async def lookup_media(query: str, media_type: str = "all", limit: int = 8, time
             seen.add(key)
             deduped.append(r)
 
-    # Rank: movies/tv with ratings first, then the rest.
+    # Rank: exact title match first, then type + rating. Fuzzy provider junk sinks.
     def _rank(r: Dict[str, Any]) -> tuple:
         rating = r.get("imdb_rating")
         try:
@@ -440,7 +596,7 @@ async def lookup_media(query: str, media_type: str = "all", limit: int = 8, time
         except Exception:
             rating_f = 0.0
         type_boost = {"movie": 2, "tv": 2, "book": 1, "info": 0, "game": 1}.get(str(r.get("type")), 0)
-        return (type_boost, rating_f)
+        return (title_similarity(q, str(r.get("title", ""))), type_boost, rating_f)
 
     deduped.sort(key=_rank, reverse=True)
     return {
@@ -448,5 +604,6 @@ async def lookup_media(query: str, media_type: str = "all", limit: int = 8, time
         "type": mt,
         "total_found": len(deduped),
         "returned": min(len(deduped), limit),
+        "keys_configured": keys,
         "results": deduped[:limit],
     }
