@@ -15,7 +15,7 @@ import httpx
 
 logger = logging.getLogger("evatorrent.metadata")
 
-UA = {"User-Agent": "evaTorrent/0.7.2 (Discover metadata lookup)"}
+UA = {"User-Agent": "evaTorrent/0.7.3 (Discover metadata lookup)"}
 DEFAULT_TIMEOUT = 10.0
 
 

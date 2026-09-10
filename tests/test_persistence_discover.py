@@ -228,6 +228,29 @@ async def test_web_swarm_fallback_and_discover_routes():
             assert ms.call_args.kwargs.get("hindi") is True
 
 
+@pytest.mark.asyncio
+async def test_discover_keys_endpoint(monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+    from evatorrent.web.app import app, auth_config, session_manager
+
+    auth_config.set_admin_email("admin@example.com")
+    token = session_manager.create_token("admin@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=headers) as client:
+        monkeypatch.delenv("TMDB_API_KEY", raising=False)
+        monkeypatch.delenv("OMDB_API_KEY", raising=False)
+        resp = await client.get("/api/discover/keys")
+        assert resp.status_code == 200
+        assert resp.json() == {"keys_configured": {"tmdb": False, "omdb": False}}
+
+        monkeypatch.setenv("TMDB_API_KEY", "dummy")
+        monkeypatch.setenv("OMDB_API_KEY", "dummy")
+        resp = await client.get("/api/discover/keys")
+        assert resp.status_code == 200
+        assert resp.json() == {"keys_configured": {"tmdb": True, "omdb": True}}
+
+
 def test_title_similarity_exact_first():
     from evatorrent.metadata.service import title_similarity
 
