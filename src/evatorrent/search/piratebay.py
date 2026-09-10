@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import urllib.parse
 import httpx
 
+from evatorrent import __version__
 from evatorrent.search.base import BaseSearchProvider, SearchCategory, SearchResult, format_bytes
 
 logger = logging.getLogger("evaTorrent.search.piratebay")
@@ -77,7 +78,7 @@ class PirateBaySearchProvider(BaseSearchProvider):
         cat_id = CATEGORY_PARAM_MAP.get(category, 0)
         params = {"q": q, "cat": str(cat_id)}
         headers = {
-            "User-Agent": "evaTorrent/0.4.0 (Autonomous BitTorrent Client; https://github.com/akash211/evaTorrent)",
+            "User-Agent": f"evaTorrent/{__version__} (Autonomous BitTorrent Client; https://github.com/akash211/evaTorrent)",
             "Accept": "application/json",
         }
         effective_timeout = float(timeout) if timeout is not None and timeout > 0 else self.timeout
@@ -136,7 +137,7 @@ class PirateBaySearchProvider(BaseSearchProvider):
 
                     magnet = build_magnet(info_hash, name)
                     source_link = f"https://thepiratebay.org/description.php?id={item_id}" if item_id and item_id != "0" else f"https://apibay.org/q.php?q={urllib.parse.quote(name)}"
-                    direct_torrent_link = f"https://itorrents.org/torrent/{info_hash.upper()}.torrent"
+                    direct_torrent_link = f"https://itorrents.net/torrent/{info_hash.upper()}.torrent"
 
                     results.append(
                         SearchResult(

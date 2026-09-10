@@ -1252,6 +1252,14 @@ async function executeTorrentSearch(forceRefresh = false) {
           ? `<div class="search-source-row"><span class="search-source-label">Source:</span> <a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener noreferrer" class="search-source-link">${escapeHtml(item.source_url)}</a></div>`
           : '';
 
+        // Health score badge
+        const hs = item.health_score || 0;
+        let healthColor, healthLabel;
+        if (hs >= 0.7) { healthColor = '#4ade80'; healthLabel = 'Healthy'; }
+        else if (hs >= 0.3) { healthColor = '#facc15'; healthLabel = 'Moderate'; }
+        else { healthColor = '#f87171'; healthLabel = 'Low'; }
+        const healthBadge = `<span title="Health: ${(hs * 100).toFixed(0)}% (${healthLabel})" style="display:inline-flex;align-items:center;gap:3px;font-size:0.7rem;color:${healthColor};margin-left:6px;"><span style="width:7px;height:7px;border-radius:50%;background:${healthColor};display:inline-block;"></span>${(hs * 100).toFixed(0)}%</span>`;
+
         return `
           <tr>
             <td>
@@ -1259,7 +1267,8 @@ async function executeTorrentSearch(forceRefresh = false) {
                 <span class="search-title-text" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</span>
                 <div class="search-meta-row">
                   <span class="cat-tag">${escapeHtml(item.category || 'General')}</span>
-                  <span>${escapeHtml(item.provider || 'Indexer')}${dateStr}</span>
+                  <span class="cat-tag" style="background:rgba(99,102,241,0.15);color:#818cf8;">${escapeHtml(item.provider || 'Indexer')}</span>${healthBadge}
+                  <span style="color:var(--text-muted);font-size:0.75rem;">${dateStr}</span>
                 </div>
                 ${sourceHtml}
               </div>

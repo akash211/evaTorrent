@@ -44,6 +44,8 @@ class SearchResult:
     added_date: str = ""
     source_url: str = ""
     torrent_url: str = ""
+    health_score: float = 0.0
+    age_days: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -59,6 +61,8 @@ class SearchResult:
             "added_date": self.added_date,
             "source_url": self.source_url,
             "torrent_url": self.torrent_url,
+            "health_score": round(self.health_score, 2),
+            "age_days": self.age_days,
         }
 
 

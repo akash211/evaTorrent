@@ -380,3 +380,155 @@ async def test_limetorrents_provider_parsing():
         assert "https://www.limetorrents.lol/Just-Like-Heaven" in r.source_url
 
 
+@pytest.mark.asyncio
+async def test_yts_provider_parsing():
+    from evatorrent.search.yts import YtsSearchProvider
+
+    provider = YtsSearchProvider()
+    fake_json = {
+        "status": "ok",
+        "data": {
+            "movie_count": 1,
+            "movies": [
+                {
+                    "title": "Inception",
+                    "title_long": "Inception (2010)",
+                    "url": "https://yts.mx/movies/inception-2010",
+                    "date_uploaded": "2023-01-15 12:00:00",
+                    "genres": ["Sci-Fi", "Action"],
+                    "torrents": [
+                        {
+                            "hash": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2",
+                            "quality": "1080p",
+                            "type": "bluray",
+                            "size": "1.80 GB",
+                            "size_bytes": 1932735283,
+                            "seeds": 150,
+                            "peers": 30,
+                            "url": "https://yts.mx/torrent/download/A1B2C3D4",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = fake_json
+        mock_get.return_value = mock_resp
+
+        results = await provider.search("inception")
+        assert len(results) == 1
+        r = results[0]
+        assert "Inception" in r.title
+        assert "1080p" in r.title
+        assert r.info_hash == "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        assert r.seeders == 150
+        assert r.leechers == 30
+        assert r.category == "Movies"
+        assert r.provider == "YTS"
+        assert r.source_url == "https://yts.mx/movies/inception-2010"
+
+
+@pytest.mark.asyncio
+async def test_nyaa_provider_parsing():
+    from evatorrent.search.nyaa import NyaaSearchProvider, parse_size_to_bytes
+
+    assert parse_size_to_bytes("1.4 GiB") == int(1.4 * 1024 * 1024 * 1024)
+    assert parse_size_to_bytes("500 MiB") == int(500 * 1024 * 1024)
+
+    provider = NyaaSearchProvider()
+    fake_rss = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+      <channel>
+        <item>
+          <title>Frieren Beyond Journey End S01E01 1080p</title>
+          <link>https://nyaa.si/download/123456.torrent</link>
+          <guid>https://nyaa.si/view/123456</guid>
+          <nyaa:infoHash>AABB11223344556677889900AABB112233445566</nyaa:infoHash>
+          <nyaa:seeders>200</nyaa:seeders>
+          <nyaa:leechers>15</nyaa:leechers>
+          <nyaa:size>1.4 GiB</nyaa:size>
+          <nyaa:category>Anime - English-translated</nyaa:category>
+        </item>
+      </channel>
+    </rss>"""
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = fake_rss
+        mock_get.return_value = mock_resp
+
+        results = await provider.search("frieren")
+        assert len(results) == 1
+        r = results[0]
+        assert "Frieren" in r.title
+        assert r.info_hash == "aabb11223344556677889900aabb112233445566"
+        assert r.seeders == 200
+        assert r.leechers == 15
+        assert r.category == "Anime"
+        assert r.provider == "Nyaa"
+
+
+@pytest.mark.asyncio
+async def test_eztv_provider_parsing():
+    from evatorrent.search.eztv import EztvSearchProvider
+
+    provider = EztvSearchProvider()
+    fake_html = """
+    <table class="forum_header_border">
+      <tr name="hover" class="forum_header_border">
+        <td class="forum_thread_post"><a href="/ep/show1" class="epinfo">Breaking Bad S01E01 720p</a></td>
+        <td class="forum_thread_post"><a href="magnet:?xt=urn:btih:CCDD11223344556677889900CCDD112233445566&dn=breaking" class="magnet">&nbsp;</a>
+            <a href="https://eztv.re/download/1.torrent" class="download_1"></a></td>
+        <td class="forum_thread_post">700 MB</td>
+        <td class="forum_thread_post"><font color="green">85</font></td>
+      </tr>
+    </table>"""
+
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = fake_html
+        mock_get.return_value = mock_resp
+
+        results = await provider.search("breaking bad")
+        assert len(results) == 1
+        r = results[0]
+        assert "Breaking Bad" in r.title
+        assert r.info_hash == "ccdd11223344556677889900ccdd112233445566"
+        assert r.seeders == 85
+        assert r.category == "TV / Series"
+        assert r.provider == "EZTV"
+
+
+def test_health_scoring():
+    from evatorrent.search.health import compute_health_score
+
+    # Dead torrent: 0 seeds, 0 leechers
+    assert compute_health_score(0, 0) == 0.0
+
+    # Ghost seeder: 1 seed, 0 leechers, >90 days old
+    score_ghost = compute_health_score(1, 0, age_days=120)
+    assert score_ghost < 0.05
+
+    # Healthy torrent: many seeds
+    score_healthy = compute_health_score(500, 50, age_days=7)
+    assert score_healthy > 0.5
+
+    # Very popular torrent
+    score_popular = compute_health_score(5000, 200, age_days=1)
+    assert score_popular > 0.8
+
+    # Score decreases with age for low-seed torrents
+    score_new = compute_health_score(2, 1, age_days=1)
+    score_old = compute_health_score(2, 1, age_days=365)
+    assert score_new > score_old
+
+    # All scores within bounds
+    for s, lch, a in [(0, 0, 0), (1, 0, 0), (100, 50, 30), (10000, 1000, 1)]:
+        score = compute_health_score(s, lch, age_days=a)
+        assert 0.0 <= score <= 1.0

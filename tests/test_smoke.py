@@ -23,7 +23,7 @@ def test_cli_parser_and_imports():
 
 
 def test_version_string():
-    assert __version__ == "0.5.2"
+    assert __version__ == "0.6.0"
 
 
 def test_ruff_lint_check():
@@ -46,18 +46,18 @@ def test_project_configuration_files_validity():
     assert pyproject_file.exists()
     content = pyproject_file.read_text(encoding="utf-8")
     parsed_toml = tomllib.loads(content)
-    assert parsed_toml["project"]["version"] == "0.5.2"
+    assert parsed_toml["project"]["version"] == "0.6.0"
 
     # 2. Docker Compose validity
     compose_file = root_dir / "docker-compose.yml"
     assert compose_file.exists()
     compose_text = compose_file.read_text(encoding="utf-8")
-    assert "image: akashkece/evatorrent:0.5.2" in compose_text
+    assert "image: akashkece/evatorrent:0.6.0" in compose_text
 
     # 3. Web UI HTML template integrity
     index_html = root_dir / "src" / "evatorrent" / "web" / "static" / "index.html"
     assert index_html.exists()
     html_text = index_html.read_text(encoding="utf-8")
     assert "<!DOCTYPE html>" in html_text
-    assert "v0.5.2 • Asyncio Core" in html_text
+    assert "v0.6.0 • Asyncio Core" in html_text
 

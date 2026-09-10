@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Sequence
 
 from evatorrent.search.base import (
@@ -12,8 +13,13 @@ from evatorrent.search.base import (
     SearchResult,
 )
 from evatorrent.search.cache import SearchCacheManager
+from evatorrent.search.eztv import EztvSearchProvider
+from evatorrent.search.health import compute_health_score
 from evatorrent.search.limetorrents import LimeTorrentsSearchProvider
+from evatorrent.search.nyaa import NyaaSearchProvider
 from evatorrent.search.piratebay import PirateBaySearchProvider
+from evatorrent.search.x1337 import X1337SearchProvider
+from evatorrent.search.yts import YtsSearchProvider
 
 import re
 
@@ -73,7 +79,14 @@ class SearchService:
         cache_manager: SearchCacheManager | None = None,
     ):
         if providers is None:
-            self.providers = [PirateBaySearchProvider(), LimeTorrentsSearchProvider()]
+            self.providers = [
+                PirateBaySearchProvider(),
+                LimeTorrentsSearchProvider(),
+                YtsSearchProvider(),
+                EztvSearchProvider(),
+                NyaaSearchProvider(),
+                X1337SearchProvider(),
+            ]
         else:
             self.providers = list(providers)
         self.cache_manager = cache_manager
@@ -142,18 +155,44 @@ class SearchService:
                     suggestion_used = alt
                     break
 
-        # Sort by seeders descending, then leechers descending
-        all_results.sort(key=lambda x: (x.seeders, x.leechers), reverse=True)
+        # 3. Compute health scores for each result
+        now = datetime.now(timezone.utc)
+        for r in all_results:
+            # Estimate age_days from added_date if available
+            if r.added_date and r.age_days == 0:
+                try:
+                    # Handle various date formats
+                    date_str = r.added_date.strip()
+                    if len(date_str) == 10:  # YYYY-MM-DD
+                        dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    elif len(date_str) == 19:  # YYYY-MM-DD HH:MM:SS
+                        dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    else:
+                        dt = None
+                    if dt:
+                        r.age_days = max(0, (now - dt).days)
+                except (ValueError, TypeError):
+                    pass
+            r.health_score = compute_health_score(
+                seeders=r.seeders,
+                leechers=r.leechers,
+                age_days=r.age_days,
+                size_bytes=r.size_bytes,
+            )
+
+        # Sort by health_score descending (primary), then seeders descending (secondary)
+        all_results.sort(key=lambda x: (x.health_score, x.seeders, x.leechers), reverse=True)
 
         total_found = len(all_results)
-        active_results = [r for r in all_results if r.seeders > 0 or r.leechers > 0]
         fallback_applied = False
 
         if hide_dead:
-            if active_results:
-                final_results = active_results
+            # Filter out confirmed dead & ghost torrents (health_score < 0.05)
+            healthy = [r for r in all_results if r.health_score >= 0.05]
+            if healthy:
+                final_results = healthy
             else:
-                # Fallback: if no active torrents found, show what was found
+                # Fallback: if no healthy torrents found, show what was found
                 final_results = all_results
                 fallback_applied = True
         else:
@@ -184,3 +223,4 @@ class SearchService:
             )
 
         return ret
+
