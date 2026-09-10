@@ -507,6 +507,9 @@ async function deleteTorrent(hash) {
       if (selectedTorrentHash === hash) {
         closeInspector();
       }
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast(data.detail || 'Failed to delete torrent', 'error');
     }
   } catch (e) {
     showToast('Failed to delete torrent', 'error');
