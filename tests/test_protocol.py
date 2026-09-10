@@ -86,11 +86,7 @@ def test_request_and_piece():
 async def test_peer_stream_iterator():
     reader = asyncio.StreamReader()
     # Feed multiple messages into reader: KeepAlive, Unchoke, Have(12)
-    data = (
-        KeepAlive().encode()
-        + Unchoke().encode()
-        + Have(piece_index=12).encode()
-    )
+    data = KeepAlive().encode() + Unchoke().encode() + Have(piece_index=12).encode()
     reader.feed_data(data)
     reader.feed_eof()
 

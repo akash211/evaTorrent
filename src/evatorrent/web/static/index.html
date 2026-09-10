@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="/static/style.css?v=0.6.0" />
+  <link rel="stylesheet" href="/static/style.css?v=0.7.0" />
 </head>
 <body>
   <div class="app-container">
@@ -27,7 +27,7 @@
         </div>
         <div class="brand-text">
           <h1>evaTorrent</h1>
-          <span class="version-tag">v0.6.0 • Asyncio Core</span>
+          <span class="version-tag">v0.7.0 • Asyncio Core</span>
         </div>
       </div>
 
@@ -56,6 +56,10 @@
         <button id="nav-btn-search" class="view-tab-btn" onclick="switchMainView('search')">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           Torrent Search 🔍
+        </button>
+        <button id="nav-btn-discover" class="view-tab-btn" onclick="switchMainView('discover')">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          Discover ✨
         </button>
         <button id="nav-btn-analytics" class="view-tab-btn" onclick="switchMainView('analytics')">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
@@ -248,6 +252,14 @@
                 <input type="checkbox" id="search-active-only" checked onchange="triggerSearchFilterChange()" />
                 <span>Active seeds only (with fallback)</span>
               </label>
+              <label class="toggle-control" title="Show Hindi / Hindi-dubbed / Dual-Audio results (great for Bollywood & Hollywood Hindi dubs)">
+                <input type="checkbox" id="search-hindi-only" onchange="triggerSearchFilterChange()" />
+                <span>🇮🇳 Hindi / Dual Audio</span>
+              </label>
+              <label class="toggle-control" title="Prefer English results (drops Hindi-only, keeps Dual-Audio)">
+                <input type="checkbox" id="search-english-only" onchange="triggerSearchFilterChange()" />
+                <span>🇬🇧 English</span>
+              </label>
               <div class="timeout-control">
                 <span class="timeout-label">Max Wait:</span>
                 <select id="search-timeout-select" class="timeout-select">
@@ -343,6 +355,49 @@
             </table>
           </div>
         </div>
+      </div>
+
+      <!-- Discover (Just Search) View Pane: movies / TV / books / games info -->
+      <div id="view-pane-discover" class="view-pane hidden">
+        <div class="search-hero">
+          <div class="search-hero-content">
+            <h2>Discover ✨ — Just Search Anything</h2>
+            <p>Movies, TV shows, books & games: release date, runtime, IMDb & Rotten Tomatoes, Wikipedia, budget & box office, India OTT hints, languages, and an inline YouTube trailer.</p>
+          </div>
+        </div>
+
+        <div class="search-controls-card">
+          <form id="discover-search-form" onsubmit="handleDiscoverSubmit(event)">
+            <div class="search-input-wrapper">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" class="search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="discover-search-query" placeholder="Search movies, TV shows, books, games..." autocomplete="off" />
+              <button type="submit" id="btn-discover-exec" class="btn btn-primary">Discover</button>
+            </div>
+          </form>
+
+          <div class="search-filters-row">
+            <div class="category-pills">
+              <button type="button" class="cat-pill active" data-dtype="all" onclick="selectDiscoverType('all')">All</button>
+              <button type="button" class="cat-pill" data-dtype="movie" onclick="selectDiscoverType('movie')">🎬 Movies</button>
+              <button type="button" class="cat-pill" data-dtype="tv" onclick="selectDiscoverType('tv')">📺 TV Shows</button>
+              <button type="button" class="cat-pill" data-dtype="book" onclick="selectDiscoverType('book')">📚 Books</button>
+              <button type="button" class="cat-pill" data-dtype="game" onclick="selectDiscoverType('game')">🎮 Games</button>
+            </div>
+          </div>
+          <div class="discover-hint">No API key needed. Set <code>TMDB_API_KEY</code> / <code>OMDB_API_KEY</code> on the server for accurate budget, box-office & India OTT providers.</div>
+        </div>
+
+        <div id="discover-status-bar" class="search-status-bar hidden">
+          <span id="discover-status-text">Found 0 results</span>
+        </div>
+
+        <div id="discover-empty-state" class="search-empty-state">
+          <div class="empty-icon">✨</div>
+          <h3>What are you in the mood for?</h3>
+          <p>Search above — e.g. <em>Dune Part Two</em>, <em>Breaking Bad</em>, <em>Atomic Habits</em>.</p>
+        </div>
+
+        <div id="discover-results-container" class="discover-grid hidden"></div>
       </div>
 
       <!-- Detail Inspector Drawer / Modal -->
@@ -605,6 +660,12 @@
         </div>
         <span class="mobile-tab-label">Search</span>
       </button>
+      <button id="mobile-nav-btn-discover" class="mobile-nav-tab" onclick="switchMainView('discover')" title="Discover (/discover)">
+        <div class="mobile-tab-icon-wrap">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+        </div>
+        <span class="mobile-tab-label">Discover</span>
+      </button>
       <button id="mobile-nav-btn-analytics" class="mobile-nav-tab" onclick="switchMainView('analytics')" title="Swarm Analytics & Report (/report)">
         <div class="mobile-tab-icon-wrap">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
@@ -614,6 +675,6 @@
     </nav>
   </div>
 
-  <script src="/static/app.js?v=0.6.0"></script>
+  <script src="/static/app.js?v=0.7.0"></script>
 </body>
 </html>

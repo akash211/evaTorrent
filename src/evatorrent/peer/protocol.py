@@ -37,9 +37,7 @@ class Handshake:
     def decode(cls, data: bytes) -> Handshake:
         if len(data) < HANDSHAKE_LEN:
             raise ValueError(f"Handshake must be at least {HANDSHAKE_LEN} bytes, got {len(data)}")
-        pstrlen, pstr, reserved, info_hash, peer_id = struct.unpack(
-            f">B{PSTRLEN}s8s20s20s", data[:HANDSHAKE_LEN]
-        )
+        pstrlen, pstr, reserved, info_hash, peer_id = struct.unpack(f">B{PSTRLEN}s8s20s20s", data[:HANDSHAKE_LEN])
         if pstrlen != PSTRLEN or pstr != PSTR:
             raise ValueError(f"Invalid protocol in handshake: {pstr!r}")
         return cls(info_hash=info_hash, peer_id=peer_id, reserved=reserved)
@@ -48,6 +46,7 @@ class Handshake:
 @dataclass
 class PeerMessage:
     """Base class for BitTorrent peer wire messages."""
+
     def encode(self) -> bytes:
         raise NotImplementedError
 

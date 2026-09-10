@@ -7,6 +7,7 @@ from pathlib import Path
 _test_data_dir = tempfile.mkdtemp(prefix="evatorrent_test_data_")
 os.environ["EVA_DATA_DIR"] = _test_data_dir
 
+
 @pytest.fixture(autouse=True)
 def isolate_test_data_dir(tmp_path, monkeypatch):
     """Ensures each test gets an isolated data directory."""

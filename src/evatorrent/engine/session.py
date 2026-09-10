@@ -220,7 +220,9 @@ class TorrentSession:
                             f"Torrent '{self.torrent.name}' stalled for >{int(STALL_TIMEOUT_SECONDS)}s. Marking errored."
                         )
                         self.status = TorrentStatus.ERROR
-                        self.error_message = f"Download stalled: no data received for {int(STALL_TIMEOUT_SECONDS / 60)} minutes"
+                        self.error_message = (
+                            f"Download stalled: no data received for {int(STALL_TIMEOUT_SECONDS / 60)} minutes"
+                        )
                         if self.db:
                             self.db.mark_torrent_error(self.torrent.info_hash_hex, self.error_message)
                         await self.stop()
@@ -352,9 +354,6 @@ class TorrentSession:
             "pieces_completed": len(self.piece_manager.completed_pieces),
             "piece_length": self.torrent.piece_length,
             "is_multi_file": self.torrent.is_multi_file,
-            "files": [
-                {"path": f.path, "length": f.length, "offset": f.offset}
-                for f in self.torrent.files
-            ],
+            "files": [{"path": f.path, "length": f.length, "offset": f.offset} for f in self.torrent.files],
             "trackers": self.torrent.trackers,
         }

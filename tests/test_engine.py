@@ -94,11 +94,14 @@ def test_engine_manager_download_dir_env(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_engine_manager_add_magnet(tmp_path):
     from unittest.mock import patch
+
     torrent = create_dummy_torrent()
     raw_torrent_bytes = torrent.raw_data
 
     manager = EngineManager(default_download_dir=tmp_path)
-    magnet_uri = f"magnet:?xt=urn:btih:{torrent.info_hash_hex}&dn=dummy.iso&tr=http%3A%2F%2Ftracker.example.com%2Fannounce"
+    magnet_uri = (
+        f"magnet:?xt=urn:btih:{torrent.info_hash_hex}&dn=dummy.iso&tr=http%3A%2F%2Ftracker.example.com%2Fannounce"
+    )
 
     with patch("evatorrent.engine.manager.fetch_torrent_from_caches") as mock_fetch:
         mock_fetch.return_value = raw_torrent_bytes
@@ -117,5 +120,3 @@ async def test_engine_manager_add_magnet(tmp_path):
         assert session2 is session
 
     await manager.shutdown()
-
-

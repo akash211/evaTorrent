@@ -259,7 +259,13 @@ async def test_api_recent_searches_endpoint():
     transport = ASGITransport(app=app)
     with patch("evatorrent.web.app.search_cache_manager.get_recent") as mock_recent:
         mock_recent.return_value = [
-            {"query": "ted lasso", "category": "series", "cached_timestamp": 1234567890, "total_results": 5, "cache_age_human": "5 mins ago"}
+            {
+                "query": "ted lasso",
+                "category": "series",
+                "cached_timestamp": 1234567890,
+                "total_results": 5,
+                "cache_age_human": "5 mins ago",
+            }
         ]
 
         async with AsyncClient(transport=transport, base_url="http://testserver", headers=headers) as client:

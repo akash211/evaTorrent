@@ -56,12 +56,7 @@ class NyaaSearchProvider(BaseSearchProvider):
         if not q:
             return []
 
-        params = {
-            "page": "rss",
-            "q": q,
-            "c": "0_0",
-            "f": "0"
-        }
+        params = {"page": "rss", "q": q, "c": "0_0", "f": "0"}
 
         effective_timeout = float(timeout) if timeout is not None and timeout > 0 else self.timeout
 
@@ -92,7 +87,9 @@ class NyaaSearchProvider(BaseSearchProvider):
                     source_url = guid_elem.text if guid_elem is not None and guid_elem.text else torrent_url
 
                     info_hash_elem = item.find("nyaa:infoHash", ns)
-                    info_hash = info_hash_elem.text.lower() if info_hash_elem is not None and info_hash_elem.text else ""
+                    info_hash = (
+                        info_hash_elem.text.lower() if info_hash_elem is not None and info_hash_elem.text else ""
+                    )
                     if not info_hash:
                         continue
 

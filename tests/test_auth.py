@@ -74,7 +74,10 @@ def test_auth_endpoints_and_route_protection():
         # 4. Valid setup with google_client_id
         resp_setup = client.post(
             "/api/auth/setup",
-            json={"admin_email": "admin@example.com", "google_client_id": "google-test-id-123.apps.googleusercontent.com"},
+            json={
+                "admin_email": "admin@example.com",
+                "google_client_id": "google-test-id-123.apps.googleusercontent.com",
+            },
         )
         assert resp_setup.status_code == 200
         token = resp_setup.json()["token"]
@@ -105,7 +108,11 @@ def test_auth_endpoints_and_route_protection():
         assert resp_otp_ok.status_code == 200
 
         # Retrieve generated OTP from manager for test
-        record = otp_manager.db.get_otp_record("admin@example.com") if otp_manager.db else otp_manager._otps.get("admin@example.com")
+        record = (
+            otp_manager.db.get_otp_record("admin@example.com")
+            if otp_manager.db
+            else otp_manager._otps.get("admin@example.com")
+        )
         assert record is not None
         code = record["otp"]
 
@@ -121,6 +128,7 @@ def test_auth_endpoints_and_route_protection():
 @pytest.mark.asyncio
 async def test_email_sender_no_log_when_smtp_configured(capsys):
     from evatorrent.auth import EmailSender
+
     with tempfile.TemporaryDirectory() as tmp:
         # 1. Unconfigured SMTP -> prints OTP to stdout
         cfg_unconfigured = AuthConfig(data_dir=Path(tmp) / "cfg1")
@@ -131,18 +139,18 @@ async def test_email_sender_no_log_when_smtp_configured(capsys):
 
         # 2. Configured SMTP -> does NOT print OTP to stdout
         cfg_configured = AuthConfig(data_dir=Path(tmp) / "cfg2")
-        cfg_configured._persisted.update({
-            "smtp_host": "smtp.example.com",
-            "smtp_port": 587,
-            "smtp_user": "u",
-            "smtp_password": "p",
-            "smtp_from": "no-reply@example.com",
-        })
+        cfg_configured._persisted.update(
+            {
+                "smtp_host": "smtp.example.com",
+                "smtp_port": 587,
+                "smtp_user": "u",
+                "smtp_password": "p",
+                "smtp_from": "no-reply@example.com",
+            }
+        )
         assert cfg_configured.is_smtp_configured is True
         sender2 = EmailSender(cfg_configured)
         sender2._send_smtp_sync = lambda email, otp: True
         await sender2.send_otp("user@example.com", "654321")
         captured2 = capsys.readouterr()
         assert "654321" not in captured2.out
-
-

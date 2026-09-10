@@ -83,7 +83,7 @@ class X1337SearchProvider(BaseSearchProvider):
                 # <td class="coll-3 leeches">12</td>
                 # <td class="coll-4 size">1.2 GB</td>
 
-                rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
+                rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL | re.IGNORECASE)
 
                 parsed_items = []
                 for row in rows:
@@ -95,7 +95,7 @@ class X1337SearchProvider(BaseSearchProvider):
                         continue
 
                     detail_path, title = links[1]
-                    title = re.sub(r'<[^>]+>', '', title).strip()
+                    title = re.sub(r"<[^>]+>", "", title).strip()
 
                     seed_match = re.search(r'<td[^>]*class="[^"]*seeds[^"]*"[^>]*>(\d+)</td>', row, re.IGNORECASE)
                     seeders = int(seed_match.group(1)) if seed_match else 0
@@ -103,16 +103,20 @@ class X1337SearchProvider(BaseSearchProvider):
                     leech_match = re.search(r'<td[^>]*class="[^"]*leeches[^"]*"[^>]*>(\d+)</td>', row, re.IGNORECASE)
                     leechers = int(leech_match.group(1)) if leech_match else 0
 
-                    size_match = re.search(r'<td[^>]*class="[^"]*size[^"]*"[^>]*>(.*?)(?:<span|<\/td>)', row, re.IGNORECASE)
+                    size_match = re.search(
+                        r'<td[^>]*class="[^"]*size[^"]*"[^>]*>(.*?)(?:<span|<\/td>)', row, re.IGNORECASE
+                    )
                     size_disp = size_match.group(1).strip() if size_match else ""
 
-                    parsed_items.append({
-                        "title": title,
-                        "detail_path": detail_path,
-                        "seeders": seeders,
-                        "leechers": leechers,
-                        "size_disp": size_disp,
-                    })
+                    parsed_items.append(
+                        {
+                            "title": title,
+                            "detail_path": detail_path,
+                            "seeders": seeders,
+                            "leechers": leechers,
+                            "size_disp": size_disp,
+                        }
+                    )
 
                 # limit to top 15 results
                 parsed_items = parsed_items[:15]
@@ -135,7 +139,7 @@ class X1337SearchProvider(BaseSearchProvider):
                                 return None
 
                             magnet_uri = magnet_match.group(1)
-                            hash_match = re.search(r'urn:btih:([a-fA-F0-9]{40})', magnet_uri, re.IGNORECASE)
+                            hash_match = re.search(r"urn:btih:([a-fA-F0-9]{40})", magnet_uri, re.IGNORECASE)
                             if not hash_match:
                                 return None
 
@@ -152,7 +156,7 @@ class X1337SearchProvider(BaseSearchProvider):
                                 size_formatted=item["size_disp"] or format_bytes(size_bytes),
                                 seeders=item["seeders"],
                                 leechers=item["leechers"],
-                                category="Other", # Optional logic to infer category
+                                category="Other",  # Optional logic to infer category
                                 provider=self.name,
                                 source_url=detail_url,
                                 torrent_url="",

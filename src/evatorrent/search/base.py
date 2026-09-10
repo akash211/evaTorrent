@@ -32,6 +32,7 @@ def format_bytes(num_bytes: int) -> str:
 @dataclass
 class SearchResult:
     """Represents a unified torrent search match from an indexer."""
+
     title: str
     info_hash: str
     magnet_uri: str
