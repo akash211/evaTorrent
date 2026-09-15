@@ -75,6 +75,21 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_torrent_events_hash ON torrent_events(info_hash);
                 CREATE INDEX IF NOT EXISTS idx_torrent_events_type ON torrent_events(event_type);
+
+                CREATE TABLE IF NOT EXISTS discover_saved (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    media_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    year INTEGER,
+                    item_json TEXT NOT NULL,
+                    remarks TEXT DEFAULT '',
+                    saved_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(media_type, title)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_discover_saved_type ON discover_saved(media_type);
+                CREATE INDEX IF NOT EXISTS idx_discover_saved_saved_at ON discover_saved(saved_at);
                 """
             )
             # Lightweight migration for DBs created before magnet_uri existed.
@@ -454,3 +469,88 @@ class Database:
                 "success_rate": round(success_rate, 1),
                 "avg_completion_time_seconds": round(avg_time, 1),
             }
+
+    # -------------------------------------------------------------------------
+    # Discover Saved Library
+    # -------------------------------------------------------------------------
+
+    def save_discover_item(self, item: Dict[str, Any], remarks: str = "") -> Dict[str, Any]:
+        """Saves a Discover result into the personal library. Re-saving refreshes
+        details but preserves existing remarks unless new ones are given."""
+        import json as _json
+
+        now = time.time()
+        media_type = str(item.get("type") or "info").lower()
+        title = str(item.get("title") or "Untitled")
+        year = item.get("year")
+        try:
+            year = int(year) if year is not None else None
+        except (ValueError, TypeError):
+            year = None
+        blob = _json.dumps(item)
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT id, remarks FROM discover_saved WHERE media_type = ? AND title = ?",
+                (media_type, title),
+            )
+            row = cur.fetchone()
+            if row:
+                keep_remarks = remarks if remarks else (row["remarks"] or "")
+                conn.execute(
+                    """
+                    UPDATE discover_saved
+                    SET year = ?, item_json = ?, remarks = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (year, blob, keep_remarks, now, row["id"]),
+                )
+                saved_id = row["id"]
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT INTO discover_saved (media_type, title, year, item_json, remarks, saved_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (media_type, title, year, blob, remarks or "", now, now),
+                )
+                saved_id = cur.lastrowid
+            cur = conn.execute("SELECT * FROM discover_saved WHERE id = ?", (saved_id,))
+            saved = cur.fetchone()
+            return dict(saved) if saved else {}
+
+    def get_saved_discover(
+        self,
+        media_type: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM discover_saved WHERE 1=1"
+        params: List[Any] = []
+        if media_type and media_type.lower() != "all":
+            query += " AND media_type = ?"
+            params.append(media_type.lower())
+        if search and search.strip():
+            query += " AND (title LIKE ? OR remarks LIKE ?)"
+            term = f"%{search.strip()}%"
+            params.extend([term, term])
+        query += " ORDER BY saved_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def update_discover_remarks(self, saved_id: int, remarks: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE discover_saved SET remarks = ?, updated_at = ? WHERE id = ?",
+                (remarks or "", time.time(), saved_id),
+            )
+            cursor = conn.execute("SELECT * FROM discover_saved WHERE id = ?", (saved_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def delete_saved_discover(self, saved_id: int) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.execute("DELETE FROM discover_saved WHERE id = ?", (saved_id,))
+            return cursor.rowcount > 0

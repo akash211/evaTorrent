@@ -15,7 +15,7 @@ import httpx
 
 logger = logging.getLogger("evatorrent.metadata")
 
-UA = {"User-Agent": "evaTorrent/0.7.3 (Discover metadata lookup)"}
+UA = {"User-Agent": "evaTorrent/0.8.0 (Discover metadata lookup)"}
 DEFAULT_TIMEOUT = 10.0
 
 
@@ -143,6 +143,8 @@ async def search_tvmaze(client: httpx.AsyncClient, query: str, limit: int = 6) -
         title = s.get("name") or query
         premiered = s.get("premiered")
         year = int(premiered[:4]) if premiered and len(premiered) >= 4 else None
+        ended = s.get("ended")
+        year_end = int(ended[:4]) if ended and len(ended) >= 4 and ended[:4].isdigit() else None
         rating = (s.get("rating") or {}).get("average")
         network = ((s.get("network") or {}).get("name")) or ((s.get("webChannel") or {}).get("name"))
         yt = youtube_links(title, year)
@@ -152,6 +154,7 @@ async def search_tvmaze(client: httpx.AsyncClient, query: str, limit: int = 6) -
                 "type": "tv",
                 "title": title,
                 "year": year,
+                "year_end": year_end,
                 "release_date": premiered,
                 "runtime_mins": s.get("runtime"),
                 "runtime": f"{s.get('runtime')} min/ep" if s.get("runtime") else None,
@@ -277,6 +280,16 @@ async def search_wikipedia(client: httpx.AsyncClient, query: str, limit: int = 4
     return out
 
 
+def _parse_year_range(raw: str) -> tuple[Optional[int], Optional[int]]:
+    """Parses '2025', '2010–2020', '2010-' into (start, end)."""
+    years = re.findall(r"(19|20)\d{2}", raw or "")
+    if not years:
+        return None, None
+    start = int(years[0])
+    end = int(years[1]) if len(years) > 1 else None
+    return start, end
+
+
 async def search_tmdb(client: httpx.AsyncClient, query: str, limit: int = 6) -> List[Dict[str, Any]]:
     """Movies + TV via TMDB search (needs TMDB_API_KEY). Best exact-title matcher available."""
     api_key = os.environ.get("TMDB_API_KEY", "").strip()
@@ -346,7 +359,7 @@ async def search_omdb_exact(client: httpx.AsyncClient, query: str) -> List[Dict[
         return []
     title = data.get("Title") or query
     year_raw = str(data.get("Year") or "")
-    year = int(year_raw[:4]) if len(year_raw) >= 4 and year_raw[:4].isdigit() else None
+    year, year_end = _parse_year_range(year_raw)
     rt = next((r.get("Value") for r in data.get("Ratings") or [] if r.get("Source") == "Rotten Tomatoes"), None)
     try:
         imdb_rating = float(data["imdbRating"]) if data.get("imdbRating") not in (None, "N/A") else None
@@ -362,6 +375,7 @@ async def search_omdb_exact(client: httpx.AsyncClient, query: str) -> List[Dict[
             "type": mtype,
             "title": title,
             "year": year,
+            "year_end": year_end,
             "release_date": data.get("Released") if data.get("Released") != "N/A" else None,
             "runtime_mins": None,
             "runtime": data.get("Runtime") if data.get("Runtime") != "N/A" else None,
@@ -391,6 +405,95 @@ async def search_omdb_exact(client: httpx.AsyncClient, query: str) -> List[Dict[
             else "https://www.omdbapi.com",
         }
     ]
+
+
+async def search_steam(client: httpx.AsyncClient, query: str, limit: int = 6) -> List[Dict[str, Any]]:
+    """Games via the Steam Store search API (no key). Covers CS, Doom, AoE-class titles."""
+    data = await _get_json(
+        client,
+        "https://store.steampowered.com/api/storesearch/",
+        {"term": query, "l": "english", "cc": "IN"},
+    )
+    out: List[Dict[str, Any]] = []
+    items = ((data or {}).get("items", [])) if isinstance(data, dict) else []
+    for it in items[:limit]:
+        appid = it.get("id")
+        name = it.get("name") or query
+        price = it.get("price") or {}
+        yt = youtube_links(f"{name} gameplay" if "trailer" not in name.lower() else name)
+        out.append(
+            {
+                "type": "game",
+                "title": name,
+                "year": None,
+                "release_date": None,
+                "runtime_mins": None,
+                "runtime": None,
+                "genres": [],
+                "languages": [],
+                "overview": "",
+                "poster_url": it.get("tiny_image"),
+                "imdb_id": None,
+                "imdb_url": None,
+                "imdb_rating": (it.get("metascore") or "").strip() or None,
+                "metascore": (it.get("metascore") or "").strip() or None,
+                "rotten_tomatoes": None,
+                "rotten_tomatoes_url": None,
+                "wiki_url": None,
+                "budget": None,
+                "revenue_box_office": None,
+                "ott_india": [],
+                "ott_note": "Games are not on OTT — check Steam, Epic, or console stores.",
+                "steam_appid": appid,
+                "price": price.get("final_str") or price.get("initial_str"),
+                "platforms": it.get("platforms") or {},
+                **yt,
+                "provider": "Steam",
+                "source_url": f"https://store.steampowered.com/app/{appid}/"
+                if appid
+                else "https://store.steampowered.com",
+            }
+        )
+    return out
+
+
+async def enrich_steam_details(client: httpx.AsyncClient, item: Dict[str, Any]) -> Dict[str, Any]:
+    """Fills release date/year, genres, developers, description for a Steam hit."""
+    appid = item.get("steam_appid")
+    if not appid or item.get("type") != "game":
+        return item
+    try:
+        data = (
+            await _get_json(
+                client, "https://store.steampowered.com/api/appdetails/", {"appids": appid, "cc": "IN", "l": "english"}
+            )
+            or {}
+        )
+        entry = data.get(str(appid)) or {}
+        if not entry.get("success"):
+            return item
+        info = entry.get("data") or {}
+        rel = (info.get("release_date") or {}).get("date") or ""
+        year = None
+        m = re.search(r"(19|20)\d{2}", rel)
+        if m:
+            year = int(m.group(0))
+        if year:
+            item["year"] = year
+            item["release_date"] = rel
+        if info.get("short_description") and not item.get("overview"):
+            item["overview"] = info["short_description"]
+        if info.get("genres"):
+            item["genres"] = [g.get("description") for g in info["genres"] if g.get("description")]
+        if info.get("developers"):
+            item["developers"] = info["developers"]
+        if info.get("header_image"):
+            item["poster_url"] = info["header_image"]
+        if info.get("website"):
+            item["official_site"] = info["website"]
+    except Exception as e:
+        logger.debug(f"Steam details failed: {e}")
+    return item
 
 
 async def enrich_with_tmdb(client: httpx.AsyncClient, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -437,6 +540,11 @@ async def enrich_with_tmdb(client: httpx.AsyncClient, item: Dict[str, Any]) -> D
             item["runtime"] = f"{runtime_val} min" + (" / ep" if kind == "tv" else "")
         if not item.get("network") and detail.get("networks"):
             item["network"] = (detail["networks"][0] or {}).get("name")
+        if kind == "tv" and detail.get("last_air_date"):
+            try:
+                item["year_end"] = int(str(detail["last_air_date"])[:4])
+            except (ValueError, TypeError):
+                pass
         if detail.get("spoken_languages"):
             item["languages"] = [
                 lang.get("english_name") or lang.get("name")
@@ -477,6 +585,11 @@ async def enrich_with_omdb(client: httpx.AsyncClient, item: Dict[str, Any]) -> D
         data = await _get_json(client, "https://www.omdbapi.com/", params) or {}
         if str(data.get("Response")).lower() != "true":
             return item
+        y_start, y_end = _parse_year_range(str(data.get("Year") or ""))
+        if y_start and not item.get("year"):
+            item["year"] = y_start
+        if y_end:
+            item["year_end"] = y_end
         if data.get("imdbRating") and data["imdbRating"] != "N/A" and not item.get("imdb_rating"):
             try:
                 item["imdb_rating"] = float(data["imdbRating"])
@@ -527,7 +640,44 @@ async def enrich_wiki_url(client: httpx.AsyncClient, item: Dict[str, Any]) -> Di
 MEDIA_TYPES = ("movie", "tv", "book", "game", "all")
 
 
-async def lookup_media(query: str, media_type: str = "all", limit: int = 8, timeout: float = 15.0) -> Dict[str, Any]:
+def apply_year_filter(results: List[Dict[str, Any]], year: Optional[int]) -> tuple[List[Dict[str, Any]], bool]:
+    """Keeps items matching a release/publish year.
+
+    Movies/books/games: exact year match. TV: year inside [premiered, ended]
+    so a 2010–2020 show matches 2010, 2016 and 2020. Items with unknown
+    year are dropped when a filter is active. Returns (filtered, applied).
+    """
+    if not year:
+        return results, False
+    kept = []
+    for r in results:
+        y = r.get("year")
+        try:
+            y = int(y) if y is not None else None
+        except (ValueError, TypeError):
+            y = None
+        if y is None:
+            continue
+        if str(r.get("type")) == "tv":
+            y_end = r.get("year_end")
+            try:
+                y_end = int(y_end) if y_end is not None else None
+            except (ValueError, TypeError):
+                y_end = None
+            # Ongoing show (no end): matches its premiere year and later.
+            if y_end is None:
+                if year >= y:
+                    kept.append(r)
+            elif y <= year <= y_end:
+                kept.append(r)
+        elif y == year:
+            kept.append(r)
+    return kept, True
+
+
+async def lookup_media(
+    query: str, media_type: str = "all", limit: int = 8, timeout: float = 15.0, year: Optional[int] = None
+) -> Dict[str, Any]:
     """Main Discover lookup — parallel free providers, optional TMDB/OMDb enrichment."""
     q = (query or "").strip()
     keys = keys_configured()
@@ -553,9 +703,11 @@ async def lookup_media(query: str, media_type: str = "all", limit: int = 8, time
                 tasks.append(search_tvmaze(client, q, limit=6))
             if mt in ("book", "all"):
                 tasks.append(search_openlibrary(client, q, limit=6))
-            if mt in ("game", "all") or (mt == "all" and len(tasks) < 3):
-                # Games have no free no-key DB; Wikipedia covers them well.
-                tasks.append(search_wikipedia(client, f"{q} {'video game' if mt == 'game' else ''}".strip(), limit=4))
+            if mt in ("game", "all"):
+                tasks.append(search_steam(client, q, limit=6))
+                tasks.append(search_wikipedia(client, f"{q} video game".strip(), limit=4))
+            elif mt == "all" and len(tasks) < 3:
+                tasks.append(search_wikipedia(client, q, limit=4))
             elif mt not in ("movie", "tv", "book"):
                 tasks.append(search_wikipedia(client, q, limit=4))
             gathered = await asyncio.gather(*tasks, return_exceptions=True)
@@ -576,6 +728,11 @@ async def lookup_media(query: str, media_type: str = "all", limit: int = 8, time
                 await asyncio.gather(*[enrich_with_tmdb(client, it) for it in results[:4]], return_exceptions=True)
             if keys["omdb"]:
                 await asyncio.gather(*[enrich_with_omdb(client, it) for it in results[:4]], return_exceptions=True)
+            game_hits = [it for it in results if it.get("type") == "game" and it.get("steam_appid")]
+            if game_hits:
+                await asyncio.gather(
+                    *[enrich_steam_details(client, it) for it in game_hits[:3]], return_exceptions=True
+                )
     except Exception as e:
         logger.warning(f"Discover lookup failed for '{q}': {e}")
 
@@ -599,9 +756,16 @@ async def lookup_media(query: str, media_type: str = "all", limit: int = 8, time
         return (title_similarity(q, str(r.get("title", ""))), type_boost, rating_f)
 
     deduped.sort(key=_rank, reverse=True)
+
+    year_applied = False
+    if year:
+        deduped, year_applied = apply_year_filter(deduped, year)
+
     return {
         "query": q,
         "type": mt,
+        "year": year,
+        "year_filter_applied": year_applied,
         "total_found": len(deduped),
         "returned": min(len(deduped), limit),
         "keys_configured": keys,

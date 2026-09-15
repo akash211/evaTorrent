@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="/static/style.css?v=0.7.3" />
+  <link rel="stylesheet" href="/static/style.css?v=0.8.0" />
 </head>
 <body>
   <div class="app-container">
@@ -27,7 +27,7 @@
         </div>
         <div class="brand-text">
           <h1>evaTorrent</h1>
-          <span class="version-tag">v0.7.3 • Asyncio Core</span>
+          <span class="version-tag">v0.8.0 • Asyncio Core</span>
         </div>
       </div>
 
@@ -383,8 +383,35 @@
               <button type="button" class="cat-pill" data-dtype="book" onclick="selectDiscoverType('book')">📚 Books</button>
               <button type="button" class="cat-pill" data-dtype="game" onclick="selectDiscoverType('game')">🎮 Games</button>
             </div>
+            <div class="search-options">
+              <div class="timeout-control">
+                <span class="timeout-label">Year:</span>
+                <input type="number" id="discover-year" class="timeout-select" placeholder="Any" min="1900" max="2100" style="width: 84px;" onchange="triggerDiscoverFilterChange()" />
+              </div>
+              <div class="category-pills">
+                <button type="button" id="discover-sub-search" class="cat-pill active" onclick="switchDiscoverSubView('search')">🔎 Search</button>
+                <button type="button" id="discover-sub-saved" class="cat-pill" onclick="switchDiscoverSubView('saved')">💾 Saved (<span id="discover-saved-count">0</span>)</button>
+              </div>
+            </div>
           </div>
           <div id="discover-key-hint" class="discover-hint">No API key needed. Set <code>TMDB_API_KEY</code> / <code>OMDB_API_KEY</code> on the server for accurate budget, box-office & India OTT providers.</div>
+
+          <!-- Recent Discover Searches -->
+          <div id="discover-recent-box" class="search-recent-box hidden">
+            <div class="recent-label-group">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" class="recent-clock-icon"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span class="recent-label">Recent:</span>
+            </div>
+            <div id="discover-recent-chips" class="search-recent-chips"></div>
+          </div>
+        </div>
+
+        <div id="discover-cache-banner" class="search-cache-banner hidden">
+          <div class="cache-banner-info">
+            <span class="cache-badge">⚡ CACHED</span>
+            <span id="discover-cache-text">Results loaded from cache</span>
+          </div>
+          <button type="button" class="btn-refresh-cache" onclick="executeDiscoverSearch(true)" title="Look up live sources again and update cache">Refresh Results</button>
         </div>
 
         <div id="discover-status-bar" class="search-status-bar hidden">
@@ -398,6 +425,13 @@
         </div>
 
         <div id="discover-results-container" class="discover-grid hidden"></div>
+
+        <div id="discover-saved-container" class="discover-grid hidden"></div>
+        <div id="discover-saved-empty-state" class="search-empty-state hidden">
+          <div class="empty-icon">💾</div>
+          <h3>No saved titles yet</h3>
+          <p>Hit <strong>💾 Save</strong> on any Discover card to build your personal library with remarks.</p>
+        </div>
       </div>
 
       <!-- Detail Inspector Drawer / Modal -->
@@ -675,6 +709,6 @@
     </nav>
   </div>
 
-  <script src="/static/app.js?v=0.7.3"></script>
+  <script src="/static/app.js?v=0.8.0"></script>
 </body>
 </html>
