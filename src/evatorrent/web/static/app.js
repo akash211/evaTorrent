@@ -862,6 +862,8 @@ function switchMainView(view, updateHistory = true) {
     setTimeout(() => document.getElementById('indexer-search-query')?.focus(), 50);
   } else if (view === 'discover') {
     refreshDiscoverKeyHint();
+    loadDiscoverRecent();
+    updateSavedCount();
     setTimeout(() => document.getElementById('discover-search-query')?.focus(), 50);
   }
 }
@@ -1505,6 +1507,15 @@ async function downloadTorrentFile(infoHash, encodedTitle) {
 // --- Discover (Just Search) — media info: movies / TV / books / games ---
 
 let currentDiscoverType = 'all';
+let currentDiscoverSubView = 'search';
+let lastDiscoverResults = [];
+let lastDiscoverQuery = '';
+
+function getDiscoverYear() {
+  const raw = document.getElementById('discover-year')?.value.trim() || '';
+  const y = parseInt(raw, 10);
+  return (!isNaN(y) && y >= 1900 && y <= 2100) ? y : null;
+}
 
 function selectDiscoverType(dtype) {
   currentDiscoverType = dtype;
@@ -1515,12 +1526,31 @@ function selectDiscoverType(dtype) {
   if (query) executeDiscoverSearch();
 }
 
+function triggerDiscoverFilterChange() {
+  const query = document.getElementById('discover-search-query')?.value.trim();
+  if (query) executeDiscoverSearch();
+}
+
 function handleDiscoverSubmit(event) {
   if (event) event.preventDefault();
+  switchDiscoverSubView('search');
   executeDiscoverSearch();
 }
 
-async function executeDiscoverSearch() {
+function switchDiscoverSubView(sub) {
+  currentDiscoverSubView = sub;
+  document.getElementById('discover-sub-search')?.classList.toggle('active', sub === 'search');
+  document.getElementById('discover-sub-saved')?.classList.toggle('active', sub === 'saved');
+  const showSearch = sub === 'search';
+  ['discover-results-container', 'discover-empty-state', 'discover-status-bar', 'discover-cache-banner'].forEach(id => {
+    document.getElementById(id)?.classList.toggle('hidden', !showSearch);
+  });
+  document.getElementById('discover-saved-container')?.classList.toggle('hidden', showSearch);
+  document.getElementById('discover-saved-empty-state')?.classList.toggle('hidden', showSearch);
+  if (sub === 'saved') loadSavedDiscover();
+}
+
+async function executeDiscoverSearch(forceRefresh = false) {
   const input = document.getElementById('discover-search-query');
   const query = input?.value.trim() || '';
   if (!query) {
@@ -1528,19 +1558,30 @@ async function executeDiscoverSearch() {
     input?.focus();
     return;
   }
+  switchDiscoverSubView('search');
+  lastDiscoverQuery = query;
+  const year = getDiscoverYear();
   const statusBar = document.getElementById('discover-status-bar');
   const statusText = document.getElementById('discover-status-text');
   const emptyEl = document.getElementById('discover-empty-state');
   const container = document.getElementById('discover-results-container');
+  const cacheBanner = document.getElementById('discover-cache-banner');
+  const cacheText = document.getElementById('discover-cache-text');
   const btn = document.getElementById('btn-discover-exec');
 
   if (btn) { btn.disabled = true; btn.textContent = 'Searching...'; }
   if (statusBar) statusBar.classList.add('hidden');
+  if (cacheBanner) cacheBanner.classList.add('hidden');
   if (container) { container.classList.add('hidden'); container.innerHTML = ''; }
-  if (emptyEl) emptyEl.innerHTML = '<div class="spinner-sm" style="margin:0 auto;"></div><h3>Looking up...</h3><p>Querying YTS, TVMaze, OpenLibrary & Wikipedia (no key needed).</p>';
+  if (emptyEl) {
+    emptyEl.classList.remove('hidden');
+    emptyEl.innerHTML = '<div class="spinner-sm" style="margin:0 auto;"></div><h3>Looking up...</h3><p>Querying TMDB, YTS, TVMaze, Steam, OpenLibrary & Wikipedia.</p>';
+  }
 
   try {
     const params = new URLSearchParams({ q: query, type: currentDiscoverType, limit: '8' });
+    if (year) params.append('year', String(year));
+    if (forceRefresh) params.append('refresh', 'true');
     const res = await fetch(`/api/discover?${params.toString()}`);
     if (!res.ok) {
       if (res.status === 401) { checkAuth(); return; }
@@ -1548,13 +1589,61 @@ async function executeDiscoverSearch() {
       throw new Error(err.detail || 'Discover lookup failed');
     }
     const data = await res.json();
+    if (data.is_cached && cacheBanner && cacheText) {
+      cacheText.textContent = `Results loaded from cache (${data.cache_age_human || 'saved'})`;
+      cacheBanner.classList.remove('hidden');
+    }
     renderDiscoverResults(data);
+    loadDiscoverRecent();
   } catch (err) {
     if (emptyEl) emptyEl.innerHTML = `<h3>Discover failed</h3><p>${escapeHtml(err.message || 'Could not fetch metadata.')}</p>`;
     showToast(err.message || 'Discover failed', 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Discover'; }
   }
+}
+
+async function loadDiscoverRecent() {
+  try {
+    const res = await fetch('/api/discover/recent');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderDiscoverRecent(data.recent_searches || []);
+  } catch (_) { /* non-fatal */ }
+}
+
+function renderDiscoverRecent(items) {
+  const box = document.getElementById('discover-recent-box');
+  const chips = document.getElementById('discover-recent-chips');
+  if (!box || !chips) return;
+  if (!items.length) { box.classList.add('hidden'); chips.innerHTML = ''; return; }
+  box.classList.remove('hidden');
+  chips.innerHTML = items.map((item, i) => {
+    const q = escapeHtml(item.query || '');
+    const typeLabel = item.type && item.type !== 'all' ? ` <span class="recent-chip-cat">${escapeHtml(item.type)}</span>` : '';
+    const yearLabel = item.year ? ` <span class="recent-chip-cat">${escapeHtml(String(item.year))}</span>` : '';
+    const age = item.cache_age_human ? ` <span class="recent-chip-age">• ${escapeHtml(item.cache_age_human)}</span>` : '';
+    return `<button type="button" class="recent-chip" data-recent-idx="${i}" title="Discover '${q}'">${q}${typeLabel}${yearLabel}${age}</button>`;
+  }).join('');
+  chips.querySelectorAll('[data-recent-idx]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const item = items[parseInt(btn.dataset.recentIdx, 10)];
+      if (!item) return;
+      const input = document.getElementById('discover-search-query');
+      if (input) input.value = item.query || '';
+      if (item.type) selectDiscoverTypeSilent(item.type);
+      const yearInput = document.getElementById('discover-year');
+      if (yearInput) yearInput.value = item.year || '';
+      executeDiscoverSearch(false);
+    });
+  });
+}
+
+function selectDiscoverTypeSilent(dtype) {
+  currentDiscoverType = dtype;
+  document.querySelectorAll('[data-dtype]').forEach(pill => {
+    pill.classList.toggle('active', pill.dataset.dtype === dtype);
+  });
 }
 
 function discoverField(label, value) {
@@ -1587,89 +1676,226 @@ async function refreshDiscoverKeyHint() {
   }
 }
 
+function renderDiscoverCard(item, idx, saved) {
+  const title = escapeHtml(item.title || 'Untitled');
+  const typeTag = escapeHtml((item.type || 'info').toUpperCase());
+  const yearEnd = item.year_end ? `–${escapeHtml(String(item.year_end))}` : '';
+  const year = item.year ? escapeHtml(String(item.year)) + yearEnd : '—';
+  const rel = item.release_date ? escapeHtml(String(item.release_date)) : year;
+  const runtime = item.runtime ? escapeHtml(String(item.runtime)) : '—';
+  const genres = (item.genres || []).map(g => `<span class="cat-tag">${escapeHtml(g)}</span>`).join(' ');
+  const langs = (item.languages || []).length ? escapeHtml(item.languages.join(', ')) : '—';
+  const overview = item.overview ? escapeHtml(String(item.overview).slice(0, 600)) : '<em>No summary available.</em>';
+  const poster = item.poster_url ? `<img src="${escapeHtml(item.poster_url)}" alt="poster" class="discover-poster" loading="lazy" onerror="this.style.display='none'"/>` : '<div class="discover-poster discover-poster-fallback">🎬</div>';
+  const imdb = item.imdb_rating !== null && item.imdb_rating !== undefined ? `⭐ ${escapeHtml(String(item.imdb_rating))}` : (item.metascore ? `Ⓜ️ ${escapeHtml(String(item.metascore))}` : '—');
+  const rt = item.rotten_tomatoes ? escapeHtml(String(item.rotten_tomatoes)) : '—';
+  const imdbLink = item.imdb_url ? `<a href="${escapeHtml(item.imdb_url)}" target="_blank" rel="noopener">IMDb ↗</a>` : '';
+  const rtLink = item.rottentomatoes_url || item.rotten_tomatoes_url ? `<a href="${escapeHtml(item.rottentomatoes_url || item.rotten_tomatoes_url)}" target="_blank" rel="noopener">Rotten Tomatoes ↗</a>` : '';
+  const wikiLink = item.wiki_url ? `<a href="${escapeHtml(item.wiki_url)}" target="_blank" rel="noopener">Wikipedia ↗</a>` : '';
+  const steamLink = item.steam_appid ? `<a href="https://store.steampowered.com/app/${escapeHtml(String(item.steam_appid))}/" target="_blank" rel="noopener">Steam ↗</a>` : '';
+  const budget = item.budget_formatted || (item.budget ? '$' + Number(item.budget).toLocaleString() : '—');
+  const box = item.box_office_formatted || (item.revenue_box_office ? escapeHtml(String(item.revenue_box_office)) : '—');
+  const price = item.price ? discoverField('Price (IN)', escapeHtml(String(item.price))) : '';
+  const ottList = (item.ott_india || []).length
+    ? (item.ott_india || []).map(o => `<span class="cat-tag">${escapeHtml(o)}</span>`).join(' ')
+    : (item.type === 'game' || item.type === 'book' ? '<em>Not on OTT — check stores/libraries.</em>' : '<em>Not confirmed — check JustWatch 🇮🇳</em>');
+  const jwLink = item.justwatch_in_url ? `<a href="${escapeHtml(item.justwatch_in_url)}" target="_blank" rel="noopener">JustWatch India ↗</a>` : '';
+  const trailerUrl = item.youtube_trailer_url ? escapeHtml(item.youtube_trailer_url) : '';
+  const trailerEmbed = item.youtube_trailer_embed ? escapeHtml(item.youtube_trailer_embed) : '';
+  const trailerBlock = trailerEmbed
+    ? `<div class="discover-trailer"><iframe src="${trailerEmbed}" title="Trailer" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe><div><a href="${trailerUrl}" target="_blank" rel="noopener">▶ Watch on YouTube ↗</a></div></div>`
+    : '';
+
+  let actionRow;
+  if (saved) {
+    const remarks = escapeHtml(saved.remarks || '');
+    actionRow = `
+      <div class="discover-remarks">
+        <span class="discover-label">My remarks (editable):</span>
+        <textarea id="remarks-${saved.id}" class="remarks-input" rows="2" placeholder="Add your notes...">${remarks}</textarea>
+        <div class="discover-actions">
+          <button class="btn-download-action" onclick="saveSavedRemarks(${saved.id})">✏️ Save remarks</button>
+          <button class="btn-action-outline" onclick="discoverSavedToTorrentSearch(${saved.id})">🔍 Find torrents</button>
+          <button class="btn-action-outline" onclick="removeSavedDiscover(${saved.id})">🗑 Remove</button>
+        </div>
+      </div>`;
+  } else {
+    actionRow = `
+      <div class="discover-actions">
+        <button class="btn-download-action" onclick="discoverToTorrentSearch(${idx})" title="Search torrents for this title">🔍 Find torrents</button>
+        <button class="btn-action-outline" onclick="saveDiscoverResult(${idx})" title="Save to your Discover library">💾 Save</button>
+      </div>`;
+  }
+
+  return `
+  <article class="discover-card">
+    <div class="discover-card-main">
+      ${poster}
+      <div class="discover-info">
+        <div class="discover-title-row"><h3>${title}</h3><span class="cat-tag">${typeTag}</span></div>
+        <div class="discover-meta">${genres}</div>
+        <p class="discover-overview">${overview}</p>
+        <div class="discover-fields">
+          ${discoverField('Released', rel)}
+          ${discoverField('Runtime', runtime)}
+          ${discoverField('Languages', langs)}
+          ${discoverField('IMDb', imdb)}
+          ${discoverField('Rotten Tomatoes', rt)}
+          ${discoverField('Budget', escapeHtml(String(budget)))}
+          ${discoverField('Box office', escapeHtml(String(box)))}
+          ${price}
+        </div>
+        <div class="discover-links">${[imdbLink, rtLink, wikiLink, steamLink, jwLink].filter(Boolean).join(' • ')}</div>
+        <div class="discover-ott"><span class="discover-label">India OTT:</span> ${ottList}</div>
+        ${actionRow}
+      </div>
+    </div>
+    ${trailerBlock}
+  </article>`;
+}
+
 function renderDiscoverResults(data) {
   const statusBar = document.getElementById('discover-status-bar');
   const statusText = document.getElementById('discover-status-text');
   const emptyEl = document.getElementById('discover-empty-state');
   const container = document.getElementById('discover-results-container');
   const results = data.results || [];
+  lastDiscoverResults = results;
 
   // Key hint: hide when both enrichment keys are live server-side.
   applyDiscoverKeyHint(data.keys_configured || {});
 
-  if (statusText) statusText.textContent = `Found ${data.total_found || 0} result(s) for "${data.query}" in ${data.elapsed_seconds || '?'}s`;
+  const yearNote = data.year ? ` • year ${escapeHtml(String(data.year))}` : '';
+  const cacheNote = data.is_cached ? ' [Cached]' : '';
+  if (statusText) statusText.textContent = `Found ${data.total_found || 0} result(s) for "${data.query}"${yearNote} in ${data.elapsed_seconds || '?'}s${cacheNote}`;
   if (statusBar) statusBar.classList.remove('hidden');
 
   if (!results.length) {
     if (container) container.classList.add('hidden');
-    if (emptyEl) emptyEl.innerHTML = `<h3>No info found for "${escapeHtml(data.query)}"</h3><p>Try a different spelling or pick a media type.</p>`;
+    if (emptyEl) {
+      emptyEl.classList.remove('hidden');
+      emptyEl.innerHTML = `<h3>No info found for "${escapeHtml(data.query)}"</h3><p>Try a different spelling${data.year ? ' or clear the year filter' : ''}, or pick a media type.</p>`;
+    }
     return;
   }
-  if (emptyEl) emptyEl.innerHTML = '';
-  if (emptyEl) emptyEl.classList.add('hidden');
+  if (emptyEl) { emptyEl.innerHTML = ''; emptyEl.classList.add('hidden'); }
 
   if (container) {
-    container.innerHTML = results.map(item => {
-      const title = escapeHtml(item.title || 'Untitled');
-      const typeTag = escapeHtml((item.type || 'info').toUpperCase());
-      const year = item.year ? escapeHtml(String(item.year)) : '—';
-      const rel = item.release_date ? escapeHtml(String(item.release_date)) : year;
-      const runtime = item.runtime ? escapeHtml(String(item.runtime)) : '—';
-      const genres = (item.genres || []).map(g => `<span class="cat-tag">${escapeHtml(g)}</span>`).join(' ');
-      const langs = (item.languages || []).length ? escapeHtml(item.languages.join(', ')) : '—';
-      const overview = item.overview ? escapeHtml(String(item.overview).slice(0, 600)) : '<em>No summary available.</em>';
-      const poster = item.poster_url ? `<img src="${escapeHtml(item.poster_url)}" alt="poster" class="discover-poster" loading="lazy" onerror="this.style.display='none'"/>` : '<div class="discover-poster discover-poster-fallback">🎬</div>';
-      const imdb = item.imdb_rating !== null && item.imdb_rating !== undefined ? `⭐ ${escapeHtml(String(item.imdb_rating))}` : '—';
-      const rt = item.rotten_tomatoes ? escapeHtml(String(item.rotten_tomatoes)) : '—';
-      const imdbLink = item.imdb_url ? `<a href="${escapeHtml(item.imdb_url)}" target="_blank" rel="noopener">IMDb ↗</a>` : '';
-      const rtLink = item.rottentomatoes_url || item.rotten_tomatoes_url ? `<a href="${escapeHtml(item.rottentomatoes_url || item.rotten_tomatoes_url)}" target="_blank" rel="noopener">Rotten Tomatoes ↗</a>` : '';
-      const wikiLink = item.wiki_url ? `<a href="${escapeHtml(item.wiki_url)}" target="_blank" rel="noopener">Wikipedia ↗</a>` : '';
-      const budget = item.budget_formatted || (item.budget ? '$' + Number(item.budget).toLocaleString() : '—');
-      const box = item.box_office_formatted || (item.revenue_box_office ? escapeHtml(String(item.revenue_box_office)) : '—');
-      const ottList = (item.ott_india || []).length
-        ? (item.ott_india || []).map(o => `<span class="cat-tag">${escapeHtml(o)}</span>`).join(' ')
-        : '<em>Not confirmed — check JustWatch 🇮🇳</em>';
-      const jwLink = item.justwatch_in_url ? `<a href="${escapeHtml(item.justwatch_in_url)}" target="_blank" rel="noopener">JustWatch India ↗</a>` : '';
-      const trailerUrl = item.youtube_trailer_url ? escapeHtml(item.youtube_trailer_url) : '';
-      const trailerEmbed = item.youtube_trailer_embed ? escapeHtml(item.youtube_trailer_embed) : '';
-      const trailerBlock = trailerEmbed
-        ? `<div class="discover-trailer"><iframe src="${trailerEmbed}" title="Trailer" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe><div><a href="${trailerUrl}" target="_blank" rel="noopener">▶ Watch on YouTube ↗</a></div></div>`
-        : '';
-      const torrentBtn = `<button class="btn-download-action" onclick="discoverToTorrentSearch('${encodeURIComponent(item.title)}')">🔍 Find torrents</button>`;
-
-      return `
-      <article class="discover-card">
-        <div class="discover-card-main">
-          ${poster}
-          <div class="discover-info">
-            <div class="discover-title-row"><h3>${title}</h3><span class="cat-tag">${typeTag}</span></div>
-            <div class="discover-meta">${genres}</div>
-            <p class="discover-overview">${overview}</p>
-            <div class="discover-fields">
-              ${discoverField('Released', rel)}
-              ${discoverField('Runtime', runtime)}
-              ${discoverField('Languages', langs)}
-              ${discoverField('IMDb', imdb)}
-              ${discoverField('Rotten Tomatoes', rt)}
-              ${discoverField('Budget', escapeHtml(String(budget)))}
-              ${discoverField('Box office', escapeHtml(String(box)))}
-            </div>
-            <div class="discover-links">${[imdbLink, rtLink, wikiLink, jwLink].filter(Boolean).join(' • ')}</div>
-            <div class="discover-ott"><span class="discover-label">India OTT:</span> ${ottList}</div>
-            <div class="discover-actions">${torrentBtn}</div>
-          </div>
-        </div>
-        ${trailerBlock}
-      </article>`;
-    }).join('');
+    container.innerHTML = results.map((item, i) => renderDiscoverCard(item, i, null)).join('');
     container.classList.remove('hidden');
   }
 }
 
-function discoverToTorrentSearch(encodedTitle) {
-  const title = decodeURIComponent(encodedTitle);
+function discoverToTorrentSearch(idx) {
+  const item = lastDiscoverResults[idx];
+  if (!item) return;
   const input = document.getElementById('indexer-search-query');
-  if (input) input.value = title;
+  if (input) input.value = item.title || '';
+  switchMainView('search');
+  executeTorrentSearch(false);
+  showToast(`Searching torrents for "${item.title}"`, 'info');
+}
+
+async function saveDiscoverResult(idx) {
+  const item = lastDiscoverResults[idx];
+  if (!item) return;
+  try {
+    const res = await fetch('/api/discover/saved', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      showToast(`Saved "${item.title}" to your library`, 'success');
+      updateSavedCount();
+    } else {
+      showToast(data.detail || 'Failed to save', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to save: ' + err.message, 'error');
+  }
+}
+
+// --- Discover Saved Library ---
+
+let savedDiscoverItems = [];
+
+async function loadSavedDiscover() {
+  const container = document.getElementById('discover-saved-container');
+  const emptyEl = document.getElementById('discover-saved-empty-state');
+  try {
+    const res = await fetch('/api/discover/saved');
+    if (!res.ok) throw new Error('Failed to load library');
+    const data = await res.json();
+    savedDiscoverItems = data.saved || [];
+    updateSavedCount(savedDiscoverItems.length);
+    if (!savedDiscoverItems.length) {
+      if (container) { container.classList.add('hidden'); container.innerHTML = ''; }
+      if (emptyEl) emptyEl.classList.remove('hidden');
+      return;
+    }
+    if (emptyEl) emptyEl.classList.add('hidden');
+    if (container) {
+      container.innerHTML = savedDiscoverItems.map(saved => {
+        let item = {};
+        try { item = JSON.parse(saved.item_json || '{}'); } catch (_) { item = { title: saved.title, type: saved.media_type }; }
+        return renderDiscoverCard(item, -1, saved);
+      }).join('');
+      container.classList.remove('hidden');
+    }
+  } catch (err) {
+    showToast(err.message || 'Failed to load library', 'error');
+  }
+}
+
+async function updateSavedCount(n) {
+  try {
+    if (n === undefined) {
+      const res = await fetch('/api/discover/saved');
+      if (res.ok) n = (await res.json()).saved?.length || 0;
+    }
+    const el = document.getElementById('discover-saved-count');
+    if (el && n !== undefined) el.textContent = n;
+  } catch (_) { /* non-fatal */ }
+}
+
+async function saveSavedRemarks(savedId) {
+  const ta = document.getElementById(`remarks-${savedId}`);
+  const remarks = ta ? ta.value : '';
+  try {
+    const res = await fetch(`/api/discover/saved/${savedId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ remarks }),
+    });
+    if (res.ok) showToast('Remarks saved', 'success');
+    else showToast('Failed to save remarks', 'error');
+  } catch (err) {
+    showToast('Failed to save remarks: ' + err.message, 'error');
+  }
+}
+
+async function removeSavedDiscover(savedId) {
+  if (!confirm('Remove this title from your library?')) return;
+  try {
+    const res = await fetch(`/api/discover/saved/${savedId}`, { method: 'DELETE' });
+    if (res.ok) {
+      showToast('Removed from library', 'info');
+      loadSavedDiscover();
+    } else {
+      showToast('Failed to remove', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to remove: ' + err.message, 'error');
+  }
+}
+
+function discoverSavedToTorrentSearch(savedId) {
+  const saved = savedDiscoverItems.find(s => s.id === savedId);
+  if (!saved) return;
+  const input = document.getElementById('indexer-search-query');
+  if (input) input.value = saved.title || '';
   switchMainView('search');
   executeTorrentSearch(false);
 }

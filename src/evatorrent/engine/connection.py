@@ -25,7 +25,7 @@ from evatorrent.tracker import Peer
 
 logger = logging.getLogger(__name__)
 
-PIPELINE_CAPACITY = 4  # Number of concurrent in-flight block requests per peer
+PIPELINE_CAPACITY = 10  # Number of concurrent in-flight block requests per peer
 
 
 class PeerConnection:

@@ -2564,6 +2564,20 @@ button, input, select, a, .cat-pill, .filter-tab, .recent-chip {
   background: #000;
 }
 .discover-trailer a { font-size: 0.82rem; color: var(--accent-cyan); }
+.discover-remarks { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.remarks-input {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.82rem;
+  padding: 8px 10px;
+  resize: vertical;
+}
+.remarks-input:focus { outline: none; border-color: var(--accent-cyan); }
+input[type="number"].timeout-select { cursor: text; }
 @media (max-width: 520px) {
   .discover-card-main { flex-direction: column; }
   .discover-poster { width: 100%; height: 200px; }

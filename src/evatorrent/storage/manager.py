@@ -16,6 +16,7 @@ from evatorrent.torrent import Torrent
 logger = logging.getLogger(__name__)
 
 BLOCK_TIMEOUT = 12.0  # seconds before in-flight block request can be reassigned
+ENDGAME_REMAINING_PIECES = 5  # last-N-pieces endgame: duplicate in-flight requests across peers
 
 
 class PieceManager:
@@ -200,6 +201,21 @@ class PieceManager:
             if len(blocks_to_request) >= max_count:
                 break
 
+        # 4. Endgame: when only a few pieces remain, re-request in-flight blocks
+        # from additional peers. First response wins; duplicates are ignored
+        # on receipt (see on_block_received), so this only costs bandwidth.
+        if not blocks_to_request and len(self.missing_pieces) + len(self.ongoing_pieces) <= ENDGAME_REMAINING_PIECES:
+            for piece_idx in list(self.ongoing_pieces):
+                if piece_idx not in peer_pieces:
+                    continue
+                piece = self.pieces[piece_idx]
+                for block in piece.blocks:
+                    if not block.is_complete:
+                        block.mark_requested()
+                        blocks_to_request.append(block)
+                        if len(blocks_to_request) >= max_count:
+                            return blocks_to_request
+
         return blocks_to_request
 
     def next_request(self, peer_key: str) -> Optional[Block]:
@@ -215,6 +231,12 @@ class PieceManager:
         piece = self.pieces[index]
         if piece.index in self.completed_pieces:
             return False  # Already complete
+
+        # Ignore duplicate arrivals (endgame duplicates / timeout reassignment):
+        # without this, bytes_downloaded would be inflated.
+        for block in piece.blocks:
+            if block.begin == begin and block.is_complete:
+                return False
 
         success = piece.set_block_data(begin, data)
         if not success:

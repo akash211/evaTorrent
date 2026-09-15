@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from enum import Enum
 from pathlib import Path
@@ -18,8 +19,20 @@ from evatorrent.tracker.manager import TrackerManager
 
 logger = logging.getLogger(__name__)
 
-# Stall timeout: if download is active but no data received for 5 minutes, transition to ERROR
-STALL_TIMEOUT_SECONDS = 300.0
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (ValueError, TypeError):
+        return default
+
+
+# Stall timeout: no data received for this long while downloading.
+# Instead of dying into ERROR, the session backs off and retries automatically
+# (see STALL_RETRY_DELAY_SECONDS) unless the user pauses it.
+STALL_TIMEOUT_SECONDS = _env_float("EVA_STALL_TIMEOUT_SECS", 300.0)
+# Backoff between automatic stall retries. EVA_STALL_RETRY_SECS=0 disables retries.
+STALL_RETRY_DELAY_SECONDS = _env_float("EVA_STALL_RETRY_SECS", 1800.0)
 
 
 from evatorrent.db.database import Database
@@ -42,7 +55,7 @@ class TorrentSession:
         self,
         torrent: Torrent,
         download_dir: Path,
-        max_peers: int = 35,
+        max_peers: int = 50,
         port: int = 6881,
         download_limit: Optional[int] = None,  # Bytes/sec, None or 0 for unlimited
         db: Optional[Database] = None,
@@ -53,6 +66,10 @@ class TorrentSession:
         self.port = port
         self.download_limit = download_limit
         self.db = db
+        # Per-session tunables (env-overridable, instance-mutable for tests).
+        self.stall_timeout_seconds = STALL_TIMEOUT_SECONDS
+        self.stall_retry_delay_seconds = STALL_RETRY_DELAY_SECONDS
+        self.stall_retries = 0
 
         self.piece_manager = PieceManager(
             torrent=torrent,
@@ -193,6 +210,9 @@ class TorrentSession:
     def _on_piece_completed(self, piece_index: int) -> None:
         """Broadcasts Have message to peers upon piece verification, or triggers completion."""
         self._last_data_received_time = time.time()
+        if self.error_message and self.error_message.startswith("Stalled"):
+            self.error_message = None
+            self.stall_retries = 0
         have_msg = Have(piece_index=piece_index)
         for peer_conn in self.active_peers.values():
             if peer_conn.is_connected:
@@ -204,6 +224,47 @@ class TorrentSession:
     def _on_peer_disconnected(self, peer_key: str) -> None:
         self.active_peers.pop(peer_key, None)
 
+    async def _handle_stall(self) -> bool:
+        """Backs off and retries a stalled download. Returns False to stop the loop.
+
+        Retries forever until the user pauses/removes the torrent (or disables
+        retries via EVA_STALL_RETRY_SECS=0). Keeps status DOWNLOADING so Live
+        Swarm keeps showing — and auto-resuming — the torrent.
+        """
+        self.stall_retries += 1
+        idle_mins = int(self.stall_timeout_seconds / 60)
+        if self.stall_retry_delay_seconds <= 0:
+            self.status = TorrentStatus.ERROR
+            self.error_message = f"Download stalled: no data received for {idle_mins} minutes"
+            if self.db:
+                self.db.mark_torrent_error(self.torrent.info_hash_hex, self.error_message)
+            await self.stop()
+            return False
+
+        wait_mins = int(self.stall_retry_delay_seconds / 60)
+        self.error_message = f"Stalled — no data for {idle_mins}m. Retry #{self.stall_retries} in ~{wait_mins}m."
+        logger.warning(f"Torrent '{self.torrent.name}' stalled. {self.error_message}")
+        if self.db:
+            self.db.log_event(self.torrent.info_hash_hex, "STALLED", self.error_message)
+        # Drop dead connections so the retry starts from a clean swarm view.
+        for peer_key, conn in list(self.active_peers.items()):
+            if not conn.is_connected:
+                self.active_peers.pop(peer_key, None)
+        try:
+            waited = 0.0
+            while waited < self.stall_retry_delay_seconds:
+                if not self._running or self.status != TorrentStatus.DOWNLOADING:
+                    return False
+                step = min(5.0, self.stall_retry_delay_seconds - waited)
+                await asyncio.sleep(step)
+                waited += step
+        except asyncio.CancelledError:
+            return False
+        if not self._running or self.status != TorrentStatus.DOWNLOADING:
+            return False
+        self._last_data_received_time = time.time()
+        return True
+
     async def _main_loop(self) -> None:
         """Main swarm maintenance loop: announces to trackers and maintains peer connections."""
         last_announce: float = 0.0
@@ -213,20 +274,14 @@ class TorrentSession:
             try:
                 now = time.time()
 
-                # Check if download stalled for over STALL_TIMEOUT_SECONDS
+                # Stalled with no data: back off and retry (unless paused/stopped).
                 if not self.piece_manager.is_complete and self.status == TorrentStatus.DOWNLOADING:
-                    if now - self._last_data_received_time > STALL_TIMEOUT_SECONDS:
-                        logger.warning(
-                            f"Torrent '{self.torrent.name}' stalled for >{int(STALL_TIMEOUT_SECONDS)}s. Marking errored."
-                        )
-                        self.status = TorrentStatus.ERROR
-                        self.error_message = (
-                            f"Download stalled: no data received for {int(STALL_TIMEOUT_SECONDS / 60)} minutes"
-                        )
-                        if self.db:
-                            self.db.mark_torrent_error(self.torrent.info_hash_hex, self.error_message)
-                        await self.stop()
-                        break
+                    if now - self._last_data_received_time > self.stall_timeout_seconds:
+                        should_continue = await self._handle_stall()
+                        if not should_continue:
+                            break
+                        last_announce = 0.0  # force a fresh tracker re-announce
+                        continue
 
                 # 1. Announce to tracker if interval expired
                 if now - last_announce >= announce_interval:
@@ -249,7 +304,7 @@ class TorrentSession:
                                     self.seen_peers.add(p_key)
                                     self.peer_queue.put_nowait(p)
                             if len(self.active_peers) < 5 and self.peer_queue.qsize() < 10:
-                                announce_interval = 60.0
+                                announce_interval = 30.0
                             else:
                                 announce_interval = max(120.0, float(response.interval))
                         else:

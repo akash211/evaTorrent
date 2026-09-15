@@ -47,6 +47,7 @@ from evatorrent.auth import (
 )
 from evatorrent.db.database import Database
 from evatorrent.engine.manager import EngineManager
+from evatorrent.metadata.cache import DiscoverCacheManager
 from evatorrent.search.cache import SearchCacheManager
 from evatorrent.search.service import SearchService
 from evatorrent.torrent import fetch_torrent_from_caches
@@ -66,6 +67,7 @@ engine_manager = EngineManager(
 )
 search_cache_dir = engine_manager.download_dir / "cached_results"
 search_cache_manager = SearchCacheManager(cache_dir=search_cache_dir, max_cached=100)
+discover_cache_manager = DiscoverCacheManager(cache_dir=search_cache_dir, max_cached=100)
 ws_manager = WebSocketManager()
 session_manager = SessionManager(auth_config)
 otp_manager = OTPManager(db=database)
@@ -777,6 +779,8 @@ async def discover_media(
     type: str = Query("all", description="Media type: all, movie, tv, book, game"),
     limit: int = Query(8, ge=1, le=20),
     timeout: float = Query(20.0, ge=5.0, le=60.0),
+    year: Optional[int] = Query(None, ge=1900, le=2100, description="Filter by release/publish year"),
+    refresh: bool = Query(False, description="Bypass cache and force a fresh lookup"),
     _: str = Depends(get_current_user),
 ):
     """Free media-info lookup (no API key required).
@@ -784,22 +788,79 @@ async def discover_media(
     Returns release date, runtime, IMDb/RT ratings + links, Wikipedia page,
     budget/box-office (when TMDB/OMDb keys are configured), India OTT hints
     via JustWatch (+accurate TMDB providers when TMDB_API_KEY is set),
-    languages, and an embeddable YouTube trailer.
+    languages, and an embeddable YouTube trailer. Results are cached on disk.
     """
     from evatorrent.metadata import lookup_media
 
     t0 = time.time()
     try:
-        data = await lookup_media(query=q, media_type=type, limit=limit, timeout=timeout)
+        if not refresh:
+            cached = discover_cache_manager.get(q, type, year)
+            if cached:
+                logger.info(f"[DISCOVER] Serving '{q}' from cache ({cached.get('cache_age_human')})")
+                return cached
+        data = await lookup_media(query=q, media_type=type, limit=limit, timeout=timeout, year=year)
         data["elapsed_seconds"] = round(time.time() - t0, 2)
         data["ott_accuracy_note"] = (
             "India OTT data is approximate (JustWatch search) unless TMDB_API_KEY is configured, "
             "in which case live TMDB India providers are returned."
         )
+        discover_cache_manager.set(q, type, year, data)
         return data
     except Exception as e:
         logger.error(f"[DISCOVER ERROR] lookup failed for '{q}': {e}")
         raise HTTPException(status_code=500, detail=f"Discover lookup failed: {e}")
+
+
+@app.get("/api/discover/recent")
+async def get_discover_recent(_: str = Depends(get_current_user)):
+    """Returns up to 10 recent Discover searches from the persistent cache."""
+    return {"recent_searches": discover_cache_manager.get_recent(limit=10)}
+
+
+class DiscoverSaveRequest(BaseModel):
+    item: dict
+    remarks: Optional[str] = ""
+
+
+class DiscoverRemarksRequest(BaseModel):
+    remarks: Optional[str] = ""
+
+
+@app.get("/api/discover/saved")
+async def list_saved_discover(
+    type: Optional[str] = "all",
+    search: Optional[str] = None,
+    _: str = Depends(get_current_user),
+):
+    """Personal Discover library saved in SQLite."""
+    return {"saved": database.get_saved_discover(media_type=type, search=search)}
+
+
+@app.post("/api/discover/saved")
+async def save_discover_item(req: DiscoverSaveRequest, _: str = Depends(get_current_user)):
+    """Saves a Discover result card into the personal library."""
+    if not req.item or not req.item.get("title"):
+        raise HTTPException(status_code=400, detail="A result item with a title is required.")
+    saved = database.save_discover_item(req.item, req.remarks or "")
+    return {"success": True, "saved": saved}
+
+
+@app.put("/api/discover/saved/{saved_id}")
+async def update_saved_remarks(saved_id: int, req: DiscoverRemarksRequest, _: str = Depends(get_current_user)):
+    """Updates the editable remarks on a saved library entry."""
+    updated = database.update_discover_remarks(saved_id, req.remarks or "")
+    if not updated:
+        raise HTTPException(status_code=404, detail="Saved entry not found")
+    return {"success": True, "saved": updated}
+
+
+@app.delete("/api/discover/saved/{saved_id}")
+async def delete_saved_discover(saved_id: int, _: str = Depends(get_current_user)):
+    """Removes an entry from the personal Discover library."""
+    if not database.delete_saved_discover(saved_id):
+        raise HTTPException(status_code=404, detail="Saved entry not found")
+    return {"success": True}
 
 
 @app.get("/api/search/recent")
