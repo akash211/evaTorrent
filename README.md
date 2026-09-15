@@ -147,5 +147,20 @@ Build artifacts are placed in `dist/` (`.tar.gz` sdist and `.whl` wheel).
 
 ---
 
+## Exploring the Codebase Graph
+This repo can generate an interactive architecture knowledge graph (requires the
+[Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) agent plugin).
+In an agent session from the project root, run `/understand` to analyze the codebase
+into `.ua/knowledge-graph.json` (gitignored, regenerable), then open it in your browser with:
+
+```
+/understand-dashboard
+```
+
+The command prints a tokenized URL like `http://127.0.0.1:5173/?token=...` — open it
+to browse layers, the guided tour, and symbol-level dependencies.
+
+---
+
 ## License
 MIT License.

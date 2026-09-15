@@ -53,6 +53,9 @@ torrents/
 # AI documentation (local only)
 AGENTS.md
 
+# Understand-Anything knowledge graph (local only, regenerated via /understand)
+.ua/
+
 # Playwright local artifacts
 .playwright/
 .playwright-cli/
