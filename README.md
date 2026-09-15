@@ -148,17 +148,28 @@ Build artifacts are placed in `dist/` (`.tar.gz` sdist and `.whl` wheel).
 ---
 
 ## Exploring the Codebase Graph
-This repo can generate an interactive architecture knowledge graph (requires the
-[Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) agent plugin).
-In an agent session from the project root, run `/understand` to analyze the codebase
-into `.ua/knowledge-graph.json` (gitignored, regenerable), then open it in your browser with:
+This repo can generate an interactive architecture knowledge graph (layers, guided
+tour, symbol-level dependencies) via the
+[Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) agent plugin.
+`/understand` and `/understand-dashboard` are **agent slash-commands** (Claude Code,
+opencode, etc.) — they won't work in a plain terminal.
 
-```
-/understand-dashboard
+From a terminal, with the plugin checked out and Node ≥ 22 available:
+
+```bash
+# 1. Generate the graph (or run /understand in an agent session instead).
+#    Writes gitignored .ua/knowledge-graph.json (regenerable, never committed).
+
+# 2. Serve the dashboard pointing at this repo (one-time install first):
+cd ~/.understand-anything-plugin/packages/dashboard && pnpm install
+
+# 3. Start it (from anywhere):
+GRAPH_DIR=/Volumes/Data_SSD/Projects/evaTorrent npx vite --host 127.0.0.1 --port 5173
 ```
 
-The command prints a tokenized URL like `http://127.0.0.1:5173/?token=...` — open it
-to browse layers, the guided tour, and symbol-level dependencies.
+Vite prints a line like `🔑 Dashboard URL: http://127.0.0.1:5173/?token=...` —
+open **that full URL including `?token=`** in your browser (without the token you
+get an access gate). Replace `GRAPH_DIR` with your checkout path if different.
 
 ---
 
