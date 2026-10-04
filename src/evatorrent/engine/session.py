@@ -8,7 +8,7 @@ import os
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Optional, Set
+from typing import Any, Callable, Coroutine, Dict, Optional, Set
 
 from evatorrent.engine.connection import PeerConnection
 from evatorrent.peer.protocol import Have
@@ -56,6 +56,7 @@ from evatorrent.db.database import Database
 class TorrentStatus(str, Enum):
     PENDING = "pending"
     CHECKING = "checking"
+    QUEUED = "queued"
     DOWNLOADING = "downloading"
     SEEDING = "seeding"
     PAUSED = "paused"
@@ -75,6 +76,8 @@ class TorrentSession:
         download_limit: Optional[int] = None,  # Bytes/sec, None or 0 for unlimited
         db: Optional[Database] = None,
         selected_files: Optional[list] = None,
+        file_priorities: Optional[dict] = None,
+        fallback_trackers: Optional[list] = None,
     ):
         self.torrent = torrent
         self.download_dir = Path(download_dir)
@@ -96,6 +99,15 @@ class TorrentSession:
         self.stall_retry_delay_seconds = STALL_RETRY_DELAY_SECONDS
         self.stall_retries = 0
         self._announce_failures = 0
+        # Engine-wide throttle hook (global speed profiles); None = no global cap.
+        self.external_throttle: Optional[Callable[[], bool]] = None
+        # Async completion hook (email notification); wired by EngineManager.
+        self.completion_notifier: Optional[Callable[[TorrentSession], Coroutine[Any, Any, None]]] = None
+        # Queue slot hook: EngineManager promotes the next queued torrent when
+        # this session frees its download slot (complete / pause / stop).
+        self.on_slot_event: Optional[Callable[[], None]] = None
+        # Position in the download queue (maintained by EngineManager).
+        self.queue_position: Optional[int] = None
         # Periodic progress line in docker logs (0/empty disables).
         try:
             self.progress_log_seconds = float(os.environ.get("EVA_PROGRESS_LOG_SECS", 300))
@@ -107,8 +119,11 @@ class TorrentSession:
             download_dir=self.download_dir,
             on_piece_complete=self._on_piece_completed,
             selected_files=selected_files,
+            file_priorities=file_priorities,
         )
-        self.tracker_manager = TrackerManager(torrent.trackers, port=port, add_fallbacks=True)
+        self.tracker_manager = TrackerManager(
+            torrent.trackers, port=port, add_fallbacks=True, extra_fallbacks=fallback_trackers
+        )
 
         self.status: TorrentStatus = TorrentStatus.PENDING
         self.error_message: Optional[str] = None
@@ -140,10 +155,16 @@ class TorrentSession:
         self._last_data_received_time = time.time()
 
     def is_throttled(self) -> bool:
-        """Returns True if the current download speed exceeds the configured per-torrent limit."""
-        if not self.download_limit or self.download_limit <= 0:
-            return False
-        return self.download_speed >= self.download_limit
+        """True when over the per-torrent limit OR the engine global limit."""
+        if self.download_limit and self.download_limit > 0:
+            if self.download_speed >= self.download_limit:
+                return True
+        try:
+            if self.external_throttle is not None and self.external_throttle():
+                return True
+        except Exception:
+            pass
+        return False
 
     def set_download_limit(self, limit_bytes_per_sec: Optional[int]) -> None:
         """Sets or clears the download rate limit for this torrent."""
@@ -152,9 +173,29 @@ class TorrentSession:
     def set_selected_files(self, selected_paths: Optional[list]) -> dict:
         """Selects which files to download (None = all). Persists to DB."""
         summary = self.piece_manager.set_selected_files(selected_paths)
+        self._persist_file_prefs(summary)
+        # A selection change can complete (or un-complete) the torrent.
+        if self.piece_manager.is_complete and self._running:
+            asyncio.create_task(self._stop_seeding_and_complete())
+        return summary
+
+    def set_file_priorities(self, priorities: dict) -> dict:
+        """Sets per-file priorities {path: 0 skip | 1 normal | 2 high}. Persists to DB."""
+        summary = self.piece_manager.set_file_priorities(dict(priorities))
+        self._persist_file_prefs(summary)
+        if self.piece_manager.is_complete and self._running:
+            asyncio.create_task(self._stop_seeding_and_complete())
+        return summary
+
+    def _persist_file_prefs(self, summary: dict) -> None:
         if self.db:
             try:
-                self.db.set_file_selection(self.torrent.info_hash_hex, self.piece_manager.selected_files)
+                self.db.set_file_priorities(self.torrent.info_hash_hex, self.piece_manager.file_priorities)
+                # Also maintain the legacy selection column for backward compatibility.
+                selected = self.piece_manager.selected_files
+                if selected is None:
+                    selected = {f.path for f in self.torrent.files}
+                self.db.set_file_selection(self.torrent.info_hash_hex, sorted(selected))
                 self.db.log_event(
                     self.torrent.info_hash_hex,
                     "FILES",
@@ -163,20 +204,24 @@ class TorrentSession:
                 )
             except Exception:
                 pass
-        # A selection change can complete (or un-complete) the torrent.
-        if self.piece_manager.is_complete and self._running:
-            asyncio.create_task(self._stop_seeding_and_complete())
-        return summary
 
     def start(self) -> None:
         if self._running:
             return
         self._running = True
         self.status = TorrentStatus.DOWNLOADING
+        self.queue_position = None
         self.error_message = None
         self._last_data_received_time = time.time()
         self._main_task = asyncio.create_task(self._main_loop())
         self._speed_task = asyncio.create_task(self._speed_meter_loop())
+
+    def _fire_slot_event(self) -> None:
+        try:
+            if self.on_slot_event is not None:
+                self.on_slot_event()
+        except Exception as e:
+            logger.debug(f"Slot event hook failed: {e}")
 
     async def pause(self) -> None:
         if self.status == TorrentStatus.PAUSED:
@@ -190,6 +235,7 @@ class TorrentSession:
             self._main_task.cancel()
         if self._speed_task and not self._speed_task.done():
             self._speed_task.cancel()
+        self._fire_slot_event()
 
     def resume(self) -> None:
         if self.status == TorrentStatus.COMPLETED:
@@ -208,7 +254,7 @@ class TorrentSession:
         self._last_data_received_time = time.time()
         self.start()
 
-    async def stop(self) -> None:
+    async def stop(self, notify_slot: bool = True) -> None:
         self._running = False
         if self.piece_manager.is_complete:
             self.status = TorrentStatus.COMPLETED
@@ -222,6 +268,8 @@ class TorrentSession:
             self._main_task.cancel()
         if self._speed_task and not self._speed_task.done():
             self._speed_task.cancel()
+        if notify_slot:
+            self._fire_slot_event()
 
     async def _stop_seeding_and_complete(self) -> None:
         """Stops peer connections immediately once download is complete - no seeding."""
@@ -248,6 +296,13 @@ class TorrentSession:
         except Exception:
             pass
 
+        # Fire-and-forget completion notification (email); never blocks stopping.
+        if self.completion_notifier is not None:
+            try:
+                asyncio.create_task(self.completion_notifier(self))
+            except Exception as e:
+                logger.debug(f"Completion notifier failed to schedule: {e}")
+
         # Disconnect all peers to prevent seeding
         for peer_conn in list(self.active_peers.values()):
             await peer_conn.stop()
@@ -257,6 +312,7 @@ class TorrentSession:
             self._main_task.cancel()
         if self._speed_task and not self._speed_task.done():
             self._speed_task.cancel()
+        self._fire_slot_event()
 
     def _on_piece_completed(self, piece_index: int) -> None:
         """Broadcasts Have message to peers upon piece verification, or triggers completion."""
@@ -513,6 +569,7 @@ class TorrentSession:
             "piece_count": self.torrent.piece_count,
             "pieces_completed": len(self.piece_manager.completed_pieces),
             "piece_length": self.torrent.piece_length,
+            "queue_position": self.queue_position,
             "is_multi_file": self.torrent.is_multi_file,
             "max_peers": self.max_peers,
             "files": [
@@ -521,6 +578,7 @@ class TorrentSession:
                     "length": f.length,
                     "offset": f.offset,
                     "selected": self.piece_manager.is_file_selected(f.path),
+                    "priority": self.piece_manager.get_file_priority(f.path),
                 }
                 for f in files[:500]
             ],

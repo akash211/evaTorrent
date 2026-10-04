@@ -74,6 +74,7 @@ async function checkAuth() {
       userDisplay.textContent = data.user_email;
       connectWebSocket();
       loadRecentSearches();
+      loadSpeedProfiles();
       return true;
     }
   } catch (err) {
@@ -388,6 +389,8 @@ function updateCounts() {
   document.getElementById('count-dl').textContent = torrents.filter(t => t.status === 'downloading').length;
   document.getElementById('count-done').textContent = torrents.filter(t => t.status === 'completed').length;
   document.getElementById('count-paused').textContent = torrents.filter(t => t.status === 'paused').length;
+  const queuedEl = document.getElementById('count-queued');
+  if (queuedEl) queuedEl.textContent = torrents.filter(t => t.status === 'queued').length;
   const errEl = document.getElementById('count-err');
   if (errEl) errEl.textContent = torrents.filter(t => t.status === 'error').length;
 }
@@ -416,6 +419,7 @@ function renderTorrentList() {
       <div class="card-header">
         <div class="card-title-group">
           <span class="status-badge ${t.status}">${t.status}</span>
+          ${t.status === 'queued' && t.queue_position ? `<span class="cat-tag" title="Waiting for a download slot">#${t.queue_position} in queue</span>` : ''}
           ${t.source === 'db' ? '<span class="cat-tag" title="Restored from database after restart — press Resume to reactivate">💾 saved</span>' : ''}
           <div class="card-title" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
         </div>
@@ -576,10 +580,16 @@ async function loadInspectorFiles(hash) {
   if (t && hash === selectedTorrentHash) renderInspectorFiles(t);
 }
 
-function isFileChecked(f) {
+function filePendingPriority(f) {
   if (pendingFileSel && f.path in pendingFileSel) return pendingFileSel[f.path];
-  return f.selected !== false;
+  return (f.priority !== undefined && f.priority !== null) ? f.priority : (f.selected === false ? 0 : 1);
 }
+
+function isFileChecked(f) {
+  return filePendingPriority(f) > 0;
+}
+
+const FILE_PRIO_LABELS = { 0: 'Skip', 1: 'Normal', 2: 'High' };
 
 function renderInspectorFiles(t) {
   const filesEl = document.getElementById('files-list');
@@ -600,24 +610,26 @@ function renderInspectorFiles(t) {
     document.getElementById('files-sel-count').textContent = `${checkedCount}/${list.length} selected`;
     document.getElementById('files-apply-bar').classList.toggle('hidden', !dirty);
   }
-  filesEl.innerHTML = list.map((f, i) => `
-    <li class="file-row${isFileChecked(f) ? '' : ' file-deselected'}">
-      <input type="checkbox" id="file-check-${i}" ${isFileChecked(f) ? 'checked' : ''}
-        onchange="toggleFileSelected(${i})" title="Include in download" />
-      <label for="file-check-${i}" class="file-path">${escapeHtml(f.path)}</label>
-      <strong class="file-size">${formatBytes(f.length)}</strong>
-    </li>
-  `).join('');
+  filesEl.innerHTML = list.map((f, i) => {
+    const prio = filePendingPriority(f);
+    const pct = (f.progress !== undefined && f.progress !== null) ? f.progress : null;
+    return `
+    <li class="file-row${prio > 0 ? '' : ' file-deselected'}">
+      <select id="file-prio-${i}" class="prio-select prio-${prio}" onchange="setFilePriority(${i}, this.value)" title="Download priority: Skip / Normal / High">
+        <option value="0"${prio === 0 ? ' selected' : ''}>Skip</option>
+        <option value="1"${prio === 1 ? ' selected' : ''}>Normal</option>
+        <option value="2"${prio === 2 ? ' selected' : ''}>High ⬆</option>
+      </select>
+      <div class="file-main">
+        <label for="file-prio-${i}" class="file-path">${escapeHtml(f.path)}</label>
+        ${pct !== null ? `<div class="file-progress-track"><div class="file-progress-fill" style="width:${Math.min(100, pct)}%"></div></div>` : ''}
+      </div>
+      <strong class="file-size">${pct !== null ? pct.toFixed(1) + '% • ' : ''}${formatBytes(f.length)}</strong>
+    </li>`;
+  }).join('');
 }
 
-function toggleFileSelected(i) {
-  const f = inspectorFiles[i];
-  if (!f) return;
-  const box = document.getElementById(`file-check-${i}`);
-  if (pendingFileSel === null) pendingFileSel = {};
-  pendingFileSel[f.path] = box ? box.checked : !isFileChecked(f);
-  const row = box ? box.closest('.file-row') : null;
-  if (row) row.classList.toggle('file-deselected', !pendingFileSel[f.path]);
+function markFilesDirty() {
   const list = inspectorFiles.length ? inspectorFiles : [];
   const checkedCount = list.filter(isFileChecked).length;
   const cnt = document.getElementById('files-sel-count');
@@ -626,10 +638,39 @@ function toggleFileSelected(i) {
   if (applyBar) applyBar.classList.remove('hidden');
 }
 
+function setFilePriority(i, value) {
+  const f = inspectorFiles[i];
+  if (!f) return;
+  if (pendingFileSel === null) pendingFileSel = {};
+  pendingFileSel[f.path] = parseInt(value, 10);
+  const sel = document.getElementById(`file-prio-${i}`);
+  if (sel) sel.className = `prio-select prio-${pendingFileSel[f.path]}`;
+  const row = sel ? sel.closest('.file-row') : null;
+  if (row) row.classList.toggle('file-deselected', pendingFileSel[f.path] === 0);
+  markFilesDirty();
+}
+
+function toggleFileSelected(i) {
+  // Legacy checkbox path (kept for compat): toggles between Skip and Normal.
+  const f = inspectorFiles[i];
+  if (!f) return;
+  setFilePriority(i, isFileChecked(f) ? 0 : 1);
+  const t = torrents.find(item => item.info_hash === selectedTorrentHash);
+  if (t) renderInspectorFiles(t);
+}
+
 function setAllFilesChecked(checked) {
   if (!inspectorFiles.length) return;
   if (pendingFileSel === null) pendingFileSel = {};
-  inspectorFiles.forEach(f => { pendingFileSel[f.path] = checked; });
+  inspectorFiles.forEach(f => { pendingFileSel[f.path] = checked ? 1 : 0; });
+  const t = torrents.find(item => item.info_hash === selectedTorrentHash);
+  if (t) renderInspectorFiles(t);
+}
+
+function setAllFilesHigh() {
+  if (!inspectorFiles.length) return;
+  if (pendingFileSel === null) pendingFileSel = {};
+  inspectorFiles.forEach(f => { pendingFileSel[f.path] = 2; });
   const t = torrents.find(item => item.info_hash === selectedTorrentHash);
   if (t) renderInspectorFiles(t);
 }
@@ -637,24 +678,31 @@ function setAllFilesChecked(checked) {
 async function applyFileSelection() {
   const hash = selectedTorrentHash;
   if (!hash || !inspectorFiles.length) return;
-  const selected = inspectorFiles.filter(isFileChecked).map(f => f.path);
+  const prioMap = {};
+  inspectorFiles.forEach(f => { prioMap[f.path] = filePendingPriority(f); });
+  const selected = Object.keys(prioMap).filter(p => prioMap[p] > 0);
+  const highCount = Object.values(prioMap).filter(p => p === 2).length;
   if (!selected.length) {
     showToast('Keep at least one file selected', 'error');
     return;
   }
-  logUIEvent('live', 'file_selection_apply', `${selected.length}/${inspectorFiles.length} files`);
+  logUIEvent('live', 'file_selection_apply', `${selected.length}/${inspectorFiles.length} files, ${highCount} high priority`);
   try {
     showToast('Applying file selection…', 'info');
     const res = await fetch(`/api/torrents/${hash}/files`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selected_paths: selected }),
+      body: JSON.stringify({ priorities: prioMap }),
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.success) {
       pendingFileSel = null;
-      inspectorFiles.forEach(f => { f.selected = selected.includes(f.path); });
-      showToast(`Downloading ${data.selected_count}/${data.total_count} files (${data.skipped_pieces} pieces skipped)`, 'success');
+      inspectorFiles.forEach(f => {
+        f.priority = prioMap[f.path];
+        f.selected = prioMap[f.path] > 0;
+      });
+      showToast(`Downloading ${data.selected_count}/${data.total_count} files (${data.high_priority_count || 0} high, ${data.skipped_pieces} pieces skipped)`, 'success');
+      loadInspectorFiles(hash);
       loadTorrents();
     } else {
       showToast(data.detail || 'Failed to apply file selection', 'error');
@@ -677,7 +725,9 @@ function refreshInspectorData(t) {
   badge.textContent = t.status.toUpperCase();
   badge.className = `inspector-badge status-badge ${t.status}`;
 
-  document.getElementById('insp-size').textContent = formatBytes(t.total_size);
+  document.getElementById('insp-size').textContent = (t.selected_bytes && t.selected_bytes < t.total_size)
+    ? `${formatBytes(t.selected_bytes)} selected of ${formatBytes(t.total_size)}`
+    : formatBytes(t.total_size);
   document.getElementById('insp-downloaded').textContent = `${formatBytes(t.downloaded)} (${t.progress}%)`;
   document.getElementById('insp-dl-speed').textContent = formatSpeed(t.download_speed);
   document.getElementById('insp-ul-speed').textContent = formatSpeed(t.upload_speed);
@@ -2057,6 +2107,52 @@ function discoverSavedToTorrentSearch(savedId) {
   if (input) input.value = saved.title || '';
   switchMainView('search');
   executeTorrentSearch(false);
+}
+
+// --- Global speed profiles ---
+
+let speedProfilesCache = [];
+
+async function loadSpeedProfiles() {
+  const sel = document.getElementById('speed-profile-select');
+  if (!sel) return;
+  try {
+    const res = await fetch('/api/speed');
+    if (!res.ok) return;
+    const data = await res.json();
+    speedProfilesCache = data.profiles || [];
+    const current = data.manual_override || 'auto';
+    sel.innerHTML = `<option value="auto">🚀 Speed: Auto${data.active_profile ? ` (${escapeHtml(data.active_profile)})` : ''}</option>` +
+      speedProfilesCache.map(p => {
+        const cap = (p.limit && p.limit > 0) ? ` (${formatBytes(p.limit)}/s)` : ' (unlimited)';
+        return `<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)}${cap}</option>`;
+      }).join('');
+    sel.value = speedProfilesCache.some(p => p.name === current) ? current : 'auto';
+    sel.title = `Global download cap: ${data.global_limit ? formatBytes(data.global_limit) + '/s' : 'unlimited'} • server time ${data.server_time || ''}`;
+  } catch (_) {}
+}
+
+async function applySpeedOverride() {
+  const sel = document.getElementById('speed-profile-select');
+  if (!sel) return;
+  const profile = sel.value === 'auto' ? null : sel.value;
+  logUIEvent('live', 'speed_override', profile || 'auto');
+  try {
+    const res = await fetch('/api/speed/override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      showToast(profile ? `Speed profile: ${profile}` : 'Speed: auto (schedule)', 'success');
+      loadSpeedProfiles();
+    } else {
+      showToast(data.detail || 'Failed to set speed profile', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to set speed profile: ' + err.message, 'error');
+  }
 }
 
 // --- Subtitles (English subs for Downloads) ---

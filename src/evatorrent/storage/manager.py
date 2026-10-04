@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 BLOCK_TIMEOUT = 12.0  # seconds before in-flight block request can be reassigned
 ENDGAME_REMAINING_PIECES = 5  # last-N-pieces endgame: duplicate in-flight requests across peers
 
+# Per-file download priorities (uTorrent-style): 0 = skip, 1 = normal, 2 = high.
+PRIO_SKIP = 0
+PRIO_NORMAL = 1
+PRIO_HIGH = 2
+VALID_PRIORITIES = (PRIO_SKIP, PRIO_NORMAL, PRIO_HIGH)
+
 
 class PieceManager:
     """Coordinates parallel block requests, piece validation, and disk saving."""
@@ -29,6 +35,7 @@ class PieceManager:
         download_dir: Path,
         on_piece_complete: Optional[Callable[[int], None]] = None,
         selected_files: Optional[List[str]] = None,
+        file_priorities: Optional[Dict[str, int]] = None,
     ):
         self.torrent = torrent
         self.disk_writer = DiskWriter(torrent, download_dir)
@@ -51,6 +58,10 @@ class PieceManager:
         self.skipped_pieces: Set[int] = set()
         # None = all files selected. Otherwise the set of selected file paths.
         self.selected_files: Optional[Set[str]] = None
+        # Per-file priority: path -> 0 skip / 1 normal / 2 high. Missing keys = normal.
+        self.file_priorities: Dict[str, int] = {}
+        # Piece priority cache: piece idx -> max priority of overlapping files.
+        self.piece_priorities: Dict[int, int] = {}
         self.selected_bytes: int = torrent.total_length
 
         # Peer availability mapping: peer_key -> Set of piece indices,
@@ -68,6 +79,8 @@ class PieceManager:
 
         if selected_files is not None:
             self._apply_selection(set(selected_files))
+        if file_priorities:
+            self._apply_priorities(dict(file_priorities))
 
     @property
     def is_complete(self) -> bool:
@@ -101,6 +114,16 @@ class PieceManager:
     def is_file_selected(self, path: str) -> bool:
         return self.selected_files is None or path in self.selected_files
 
+    def get_file_priority(self, path: str) -> int:
+        """0=skip, 1=normal, 2=high (default normal)."""
+        return self.file_priorities.get(path, PRIO_NORMAL)
+
+    def piece_priority(self, piece_idx: int) -> int:
+        """Max priority of files overlapping this piece (skip pieces -> 0)."""
+        if piece_idx in self.skipped_pieces:
+            return PRIO_SKIP
+        return self.piece_priorities.get(piece_idx, PRIO_NORMAL)
+
     def _recompute_selected_bytes(self) -> None:
         if self.selected_files is None:
             self.selected_bytes = self.torrent.total_length
@@ -112,21 +135,38 @@ class PieceManager:
                 total += self.torrent.piece_size(i)
         self.selected_bytes = total
 
-    def _apply_selection(self, selected: Set[str]) -> None:
-        """Recomputes skipped pieces for a new file selection (internal).
+    def _apply_priorities(self, prio: Dict[str, int]) -> None:
+        """Recomputes skipped pieces + piece priorities (internal).
 
-        Pieces fully covered by deselected files move to skipped_pieces;
+        Pieces fully covered by priority-0 files move to skipped_pieces;
         in-flight ones are reset (with byte accounting) so they can be
         re-requested if re-selected later.
         """
         all_paths = {f.path for f in self.torrent.files}
-        unknown = set(selected) - all_paths
+        unknown = set(prio) - all_paths
         if unknown:
             raise ValueError(f"Unknown files in selection: {sorted(unknown)[:5]}")
+        full = {path: PRIO_NORMAL for path in all_paths}
+        for path, p in prio.items():
+            if p not in VALID_PRIORITIES:
+                raise ValueError(f"Invalid priority {p!r} for '{path}': use 0=skip, 1=normal, 2=high")
+            full[path] = p
+        selected = {path for path, p in full.items() if p > PRIO_SKIP}
         if not selected:
-            raise ValueError("At least one file must stay selected.")
+            raise ValueError("At least one file must stay selected (priority > 0).")
         keep_pieces = self._pieces_overlapping_files(selected)
         new_skipped = set(range(self.torrent.piece_count)) - keep_pieces
+        # Piece priority = max priority of overlapping files.
+        piece_prio: Dict[int, int] = {}
+        for f in self.torrent.files:
+            p = full[f.path]
+            if p == PRIO_SKIP:
+                continue
+            first = f.offset // self.torrent.piece_length
+            last = (f.offset + max(f.length, 1) - 1) // self.torrent.piece_length
+            for idx in range(first, min(last, self.torrent.piece_count - 1) + 1):
+                if p > piece_prio.get(idx, PRIO_SKIP):
+                    piece_prio[idx] = p
         # Reset in-flight pieces that are now fully skipped (refund bytes so a
         # later re-select doesn't double-count them on re-download).
         for piece_idx in list(self.ongoing_pieces):
@@ -143,40 +183,83 @@ class PieceManager:
         for piece_idx in list(self.completed_pieces):
             if piece_idx in new_skipped:
                 self.pieces[piece_idx].reset()
-        self.selected_files = set(selected)
+        self.file_priorities = {path: p for path, p in full.items() if p != PRIO_NORMAL}
+        self.selected_files = None if len(selected) == len(all_paths) else set(selected)
+        self.piece_priorities = piece_prio
         self._recompute_selected_bytes()
         self._rarity_computed_at = 0.0
 
-    def set_selected_files(self, selected_paths: Optional[List[str]]) -> dict:
-        """Public file-selection update. None (or all paths) = select everything.
+    def _apply_selection(self, selected: Set[str]) -> None:
+        """Legacy include/exclude path (all selected files get normal priority)."""
+        all_paths = {f.path for f in self.torrent.files}
+        self._apply_priorities({path: (PRIO_NORMAL if path in selected else PRIO_SKIP) for path in all_paths})
 
-        Returns a summary dict for API/logging.
-        """
+    def set_selected_files(self, selected_paths: Optional[List[str]]) -> dict:
+        """Legacy include/exclude update (all selected files get normal priority)."""
         all_paths = [f.path for f in self.torrent.files]
         if selected_paths is None or set(selected_paths) == set(all_paths):
+            return self.set_file_priorities({})
+        return self.set_file_priorities(
+            {path: (PRIO_NORMAL if path in set(selected_paths) else PRIO_SKIP) for path in all_paths}
+        )
+
+    def set_file_priorities(self, priorities: Dict[str, int]) -> dict:
+        """Sets per-file priorities {path: 0 skip | 1 normal | 2 high}.
+
+        Empty dict = all normal. High-priority files' pieces are requested
+        first, so episode 1 finishes before episode 2 starts.
+        """
+        all_paths = [f.path for f in self.torrent.files]
+        if not priorities:
             self.selected_files = None
+            self.file_priorities = {}
+            self.piece_priorities = {}
             self.skipped_pieces.clear()
             self.missing_pieces |= set(range(self.torrent.piece_count)) - self.completed_pieces - self.ongoing_pieces
             self._recompute_selected_bytes()
             self._rarity_computed_at = 0.0
-            # Re-verify nothing: previously skipped pieces were never hashed;
-            # they re-enter missing and download normally.
             return {
                 "selected_count": len(all_paths),
                 "total_count": len(all_paths),
+                "high_priority_count": 0,
                 "skipped_pieces": 0,
             }
         before = len(self.skipped_pieces)
-        self._apply_selection(set(selected_paths))
-        # If everything selected again via explicit list, normalize to None.
-        if not self.skipped_pieces:
+        self._apply_priorities(dict(priorities))
+        if not self.skipped_pieces and all(p == PRIO_NORMAL for p in self.file_priorities.values()):
             self.selected_files = None
         return {
-            "selected_count": len(self.selected_files or all_paths),
+            "selected_count": len(all_paths) - sum(1 for f in all_paths if self.get_file_priority(f) == PRIO_SKIP),
             "total_count": len(all_paths),
+            "high_priority_count": sum(1 for f in all_paths if self.get_file_priority(f) == PRIO_HIGH),
             "skipped_pieces": len(self.skipped_pieces),
             "skipped_delta": len(self.skipped_pieces) - before,
         }
+
+    def file_progress(self) -> List[dict]:
+        """Per-file progress (uTorrent-style): byte-exact done/total from completed pieces."""
+        out: List[dict] = []
+        for f in self.torrent.files:
+            if f.length <= 0:
+                out.append({"path": f.path, "done_bytes": 0, "total_bytes": 0, "progress": 100.0})
+                continue
+            first = f.offset // self.torrent.piece_length
+            last = (f.offset + f.length - 1) // self.torrent.piece_length
+            done = 0
+            for idx in range(first, min(last, self.torrent.piece_count - 1) + 1):
+                if idx in self.completed_pieces:
+                    p_start = idx * self.torrent.piece_length
+                    p_end = p_start + self.torrent.piece_size(idx)
+                    done += max(0, min(p_end, f.offset + f.length) - max(p_start, f.offset))
+            out.append(
+                {
+                    "path": f.path,
+                    "done_bytes": done,
+                    "total_bytes": f.length,
+                    "progress": round(done / f.length * 100.0, 1),
+                }
+            )
+        return out
 
     def add_peer(self, peer_key: str, bitfield: Bitfield) -> None:
         """Records the pieces advertised by a peer via Bitfield."""
@@ -377,8 +460,13 @@ class PieceManager:
         now = time.time()
         blocks_to_request: List[Block] = []
 
+        # High-priority files first: ongoing pieces sorted so episode 1's
+        # blocks are requested before episode 2's.
+        def _ongoing_by_priority() -> List[int]:
+            return sorted(list(self.ongoing_pieces), key=lambda i: -self.piece_priority(i))
+
         # 1. First priority: timed-out blocks in ongoing pieces this peer has
-        for piece_idx in list(self.ongoing_pieces):
+        for piece_idx in _ongoing_by_priority():
             if self._peer_has(peer_pieces, piece_idx):
                 piece = self.pieces[piece_idx]
                 for block in piece.blocks:
@@ -390,7 +478,7 @@ class PieceManager:
                                 return blocks_to_request
 
         # 2. Second priority: unrequested blocks in ongoing pieces
-        for piece_idx in list(self.ongoing_pieces):
+        for piece_idx in _ongoing_by_priority():
             if self._peer_has(peer_pieces, piece_idx):
                 piece = self.pieces[piece_idx]
                 for block in piece.blocks:
@@ -421,8 +509,11 @@ class PieceManager:
                 candidates = [i for i in self.missing_pieces if i in peer_pieces and i not in self.ongoing_pieces]
             if len(candidates) > sort_cap:
                 # Deterministic head-sample: bounds CPU while keeping progress.
+                # Keep high-priority pieces in the sample.
+                candidates.sort(key=lambda idx: -self.piece_priority(idx))
                 candidates = candidates[:sort_cap]
-            candidates.sort(key=lambda idx: counts.get(idx, 0))
+            # High-priority files first, then rarest-first within each tier.
+            candidates.sort(key=lambda idx: (-self.piece_priority(idx), counts.get(idx, 0)))
             for piece_idx in candidates:
                 self.missing_pieces.remove(piece_idx)
                 self.ongoing_pieces.add(piece_idx)
@@ -440,7 +531,7 @@ class PieceManager:
         # from additional peers. First response wins; duplicates are ignored
         # on receipt (see on_block_received), so this only costs bandwidth.
         if not blocks_to_request and len(self.missing_pieces) + len(self.ongoing_pieces) <= ENDGAME_REMAINING_PIECES:
-            for piece_idx in list(self.ongoing_pieces):
+            for piece_idx in _ongoing_by_priority():
                 if not self._peer_has(peer_pieces, piece_idx):
                     continue
                 piece = self.pieces[piece_idx]

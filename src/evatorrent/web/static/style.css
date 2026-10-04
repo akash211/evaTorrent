@@ -370,6 +370,12 @@ body {
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
+.status-badge.queued {
+  background: rgba(129, 140, 248, 0.15);
+  color: var(--accent-purple, #818cf8);
+  border: 1px solid rgba(129, 140, 248, 0.3);
+}
+
 .card-actions {
   display: flex;
   align-items: center;
@@ -678,6 +684,46 @@ body {
   height: 16px;
   accent-color: var(--accent-primary, #22d3ee);
   cursor: pointer;
+}
+
+.prio-select {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.prio-select.prio-2 {
+  border-color: #22d3ee;
+  color: #22d3ee;
+  font-weight: 700;
+}
+
+.prio-select.prio-0 {
+  opacity: 0.7;
+}
+
+.file-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-progress-track {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.2);
+  margin-top: 5px;
+  overflow: hidden;
+}
+
+.file-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #22d3ee, #818cf8);
 }
 
 .file-row .file-path {

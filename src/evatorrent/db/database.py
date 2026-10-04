@@ -76,6 +76,11 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_torrent_events_hash ON torrent_events(info_hash);
                 CREATE INDEX IF NOT EXISTS idx_torrent_events_type ON torrent_events(event_type);
 
+                CREATE TABLE IF NOT EXISTS kv_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS discover_saved (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     media_type TEXT NOT NULL,
@@ -101,6 +106,8 @@ class Database:
                     conn.execute("ALTER TABLE torrents_history ADD COLUMN download_dir TEXT")
                 if "file_selection" not in cols:
                     conn.execute("ALTER TABLE torrents_history ADD COLUMN file_selection TEXT")
+                if "file_priorities" not in cols:
+                    conn.execute("ALTER TABLE torrents_history ADD COLUMN file_priorities TEXT")
             except Exception as e:
                 logger.warning(f"DB migration check failed: {e}")
 
@@ -402,6 +409,21 @@ class Database:
                 (magnet_uri, info_hash.lower()),
             )
 
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Reads a generic key/value setting (speed profiles, schedule, overrides)."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT value FROM kv_settings WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return str(row[0]) if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO kv_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
     def set_file_selection(self, info_hash: str, selected_files: Optional[set | list]) -> None:
         """Persists per-file download selection (JSON list of paths; NULL = all)."""
         import json
@@ -431,17 +453,77 @@ class Database:
             except Exception:
                 return None
 
+    def set_file_priorities(self, info_hash: str, priorities: Optional[dict]) -> None:
+        """Persists per-file priorities ({path: 0|1|2}; empty/None = all normal)."""
+        import json
+
+        payload = None
+        if priorities:
+            try:
+                payload = json.dumps({str(k): int(v) for k, v in priorities.items()})
+            except Exception:
+                payload = None
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE torrents_history SET file_priorities = ? WHERE info_hash = ?",
+                (payload, info_hash.lower()),
+            )
+
+    def get_file_priorities(self, info_hash: str) -> Optional[Dict[str, int]]:
+        """Returns persisted {path: prio} map, or None when unset."""
+        import json
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT file_priorities FROM torrents_history WHERE info_hash = ?",
+                (info_hash.lower(),),
+            )
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                return None
+            try:
+                data = json.loads(row[0])
+                if isinstance(data, dict):
+                    return {str(k): int(v) for k, v in data.items()}
+            except Exception:
+                pass
+            return None
+
+    def get_effective_file_priorities(
+        self, info_hash: str, all_paths: List[str]
+    ) -> Optional[Dict[str, int]]:
+        """Merges persisted priorities (or legacy selection) into a full {path: prio} map."""
+        stored = self.get_file_priorities(info_hash)
+        import json
+
+        if stored is not None and stored:
+            return {p: int(stored.get(p, 1)) for p in all_paths}
+        # Legacy fallback: file_selection list means selected=normal, rest=skip.
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT file_selection FROM torrents_history WHERE info_hash = ?",
+                (info_hash.lower(),),
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                try:
+                    selected = set(json.loads(row[0]))
+                    return {p: (1 if p in selected else 0) for p in all_paths}
+                except Exception:
+                    return None
+        return None
+
     def get_resumable_torrents(self, limit: int = 500) -> List[Dict[str, Any]]:
         """Returns DB rows that should be present in Live Swarm (survive restarts).
 
-        Includes downloading/pending/paused/error rows. Completed/removed rows
+        Includes downloading/pending/paused/queued/error rows. Completed/removed rows
         are intentionally excluded (completed = no seeding per policy).
         """
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
                 SELECT * FROM torrents_history
-                WHERE LOWER(status) IN ('downloading', 'pending', 'paused', 'error', 'seeding')
+                WHERE LOWER(status) IN ('downloading', 'pending', 'paused', 'queued', 'error', 'seeding')
                 ORDER BY added_at ASC
                 LIMIT ?
                 """,

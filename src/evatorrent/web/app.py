@@ -75,6 +75,47 @@ email_sender = EmailSender(auth_config)
 google_verifier = GoogleVerifier(auth_config)
 search_service = SearchService(cache_manager=search_cache_manager)
 
+
+def _notify_enabled() -> bool:
+    return os.environ.get("EVA_NOTIFY_ON_COMPLETE", "true").lower() in ("1", "true", "yes")
+
+
+async def notify_torrent_completed(session) -> None:
+    """Completion email hook: fires on 100% verified download (never blocks)."""
+    try:
+        if not _notify_enabled():
+            return
+        email = auth_config.admin_email
+        if not email:
+            logger.debug("[NOTIFY] Skipping completion email: admin email not set")
+            return
+        t = session.torrent
+        pm = session.piece_manager
+        gb = t.total_length / (1024**3)
+        subject = f"evaTorrent ✅ '{t.name}' finished downloading"
+        body = (
+            f"Your download has completed and verified:\n\n"
+            f"Name: {t.name}\n"
+            f"Size: {gb:.2f} GB ({t.total_length} bytes)\n"
+            f"Downloaded: {pm.bytes_downloaded} bytes\n"
+            f"Uploaded: {pm.bytes_uploaded} bytes\n"
+            f"Files: {len(t.files)}\n"
+        )
+        sent = await email_sender.send_notification(email, subject, body)
+        if sent:
+            logger.info(f"[NOTIFY] Completion email sent to '{email}' for '{t.name}'")
+            try:
+                database.log_event(t.info_hash_hex, "NOTIFIED", f"Completion email sent to {email}")
+            except Exception:
+                pass
+        else:
+            logger.warning(f"[NOTIFY] Completion email NOT sent for '{t.name}' (SMTP unconfigured or failed)")
+    except Exception as e:
+        logger.warning(f"[NOTIFY] Completion hook failed: {e}")
+
+
+engine_manager.completion_notifier = notify_torrent_completed
+
 # In-memory IP rate limiter: client_ip -> list of timestamps
 _ip_rate_limits: dict[str, list[float]] = defaultdict(list)
 
@@ -130,6 +171,13 @@ async def lifespan(app: FastAPI):
         _limits.LARGE_TORRENT_BYTES // (1024**3),
     )
     engine_manager.start_monitor()
+    engine_manager.load_speed_config()
+    engine_manager.evaluate_speed_schedule(force=True)
+    try:
+        trackers = await engine_manager.refresh_fallback_trackers()
+        logger.info(f"[STARTUP] Tracker fallbacks ready: {len(trackers)} auto-updated + baked-in defaults")
+    except Exception as e:
+        logger.warning(f"[STARTUP] Tracker fallback refresh failed: {e}")
     try:
         summary = await engine_manager.restore_from_db()
         logger.info(f"[STARTUP] Swarm auto-resume from DB: {summary}")
@@ -717,6 +765,7 @@ async def set_torrent_speed_limit(
 
 class FileSelectionRequest(BaseModel):
     selected_paths: Optional[list] = None  # None or full list = all files
+    priorities: Optional[dict] = None  # {path: 0 skip | 1 normal | 2 high}; wins over selected_paths
 
 
 @app.get("/api/torrents/{info_hash}/files")
@@ -724,21 +773,26 @@ async def get_torrent_files(
     info_hash: str,
     user: str = Depends(get_current_user),
 ):
-    """Lists torrent files with per-file selection state."""
+    """Lists torrent files with per-file selection, priority, and progress."""
     session = engine_manager.get_session(info_hash)
     if not session:
         raise HTTPException(status_code=404, detail="Torrent not found")
+    pm = session.piece_manager
+    prog = {p["path"]: p for p in pm.file_progress()}
     return {
         "files": [
             {
                 "path": f.path,
                 "length": f.length,
                 "offset": f.offset,
-                "selected": session.piece_manager.is_file_selected(f.path),
+                "selected": pm.is_file_selected(f.path),
+                "priority": pm.get_file_priority(f.path),
+                "done_bytes": prog.get(f.path, {}).get("done_bytes", 0),
+                "progress": prog.get(f.path, {}).get("progress", 0.0),
             }
             for f in session.torrent.files
         ],
-        "selected_bytes": session.piece_manager.selected_total_bytes,
+        "selected_bytes": pm.selected_total_bytes,
         "total_bytes": session.torrent.total_length,
     }
 
@@ -749,34 +803,41 @@ async def set_torrent_files(
     req: FileSelectionRequest,
     user: str = Depends(get_current_user),
 ):
-    """Selects which files to download (deselect the rest). At least one required."""
+    """Selects which files to download and their priority. At least one required."""
     session = engine_manager.get_session(info_hash)
     if not session:
-        # DB-only row: persist selection so the rebuild honors it.
+        # DB-only row: persist prefs so the rebuild honors them.
         row = database.get_torrent_history(info_hash)
         if not row:
             raise HTTPException(status_code=404, detail="Torrent not found")
         if engine_manager.db:
             try:
-                engine_manager.db.set_file_selection(info_hash, req.selected_paths)
+                if req.priorities is not None:
+                    engine_manager.db.set_file_priorities(info_hash, req.priorities)
+                else:
+                    engine_manager.db.set_file_selection(info_hash, req.selected_paths)
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Failed to persist selection: {e}")
-        logger.info(f"[TORRENT] User '{user}' staged file selection for {info_hash[:8]} (source=db)")
+        logger.info(f"[TORRENT] User '{user}' staged file prefs for {info_hash[:8]} (source=db)")
         return {"success": True, "source": "db"}
     try:
-        summary = engine_manager.set_file_selection(info_hash, req.selected_paths)
-    except ValueError as e:
-        logger.warning(f"[TORRENT] User '{user}' file selection rejected for {info_hash[:8]}: {e}")
+        if req.priorities is not None:
+            summary = engine_manager.set_file_priorities(info_hash, {str(k): int(v) for k, v in req.priorities.items()})
+        else:
+            summary = engine_manager.set_file_selection(info_hash, req.selected_paths)
+    except (ValueError, TypeError, AttributeError) as e:
+        logger.warning(f"[TORRENT] User '{user}' file prefs rejected for {info_hash[:8]}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     if summary is None:
         raise HTTPException(status_code=404, detail="Torrent not found")
     logger.info(
-        "[TORRENT] User '%s' set file selection on '%s' (%s): %d/%d files, %d pieces skipped",
+        "[TORRENT] User '%s' set file prefs on '%s' (%s): %d/%d files, %d high, %d pieces skipped",
         user,
         session.torrent.name,
         info_hash[:8],
         summary["selected_count"],
         summary["total_count"],
+        summary.get("high_priority_count", 0),
         summary["skipped_pieces"],
     )
     return {"success": True, **summary}
@@ -846,7 +907,11 @@ async def get_torrent_peers(
                 "bytes_downloaded": conn.bytes_downloaded,
             }
         )
-    return {"peers": peers_list}
+    try:
+        trackers_health = session.tracker_manager.get_health()
+    except Exception:
+        trackers_health = []
+    return {"peers": peers_list, "trackers": trackers_health}
 
 
 @app.websocket("/ws")
@@ -1039,6 +1104,68 @@ async def delete_saved_discover(saved_id: int, user: str = Depends(get_current_u
 async def get_recent_searches(_: str = Depends(get_current_user)):
     """Returns up to 10 recent searches from the persistent search cache."""
     return {"recent_searches": search_cache_manager.get_recent(limit=10)}
+
+
+# --- Global speed profiles & scheduler ---
+
+
+class SpeedProfilesRequest(BaseModel):
+    profiles: Optional[list] = None  # [{name, limit}] limit null/0 = unlimited
+    schedule: Optional[list] = None  # [{profile, start HH:MM, end HH:MM, days?}]
+
+
+class SpeedOverrideRequest(BaseModel):
+    profile: Optional[str] = None  # None = back to schedule
+
+
+@app.get("/api/speed")
+async def get_speed_config(_: str = Depends(get_current_user)):
+    """Current global speed state: profiles, schedule, active profile, cap."""
+    import datetime as _dt
+
+    return {
+        "profiles": engine_manager.speed_profiles,
+        "schedule": engine_manager.speed_schedule,
+        "active_profile": engine_manager.active_speed_profile,
+        "manual_override": engine_manager.speed_override,
+        "global_limit": engine_manager.global_download_limit,
+        "server_time": _dt.datetime.now().strftime("%Y-%m-%d %H:%M (%A)"),
+    }
+
+
+@app.put("/api/speed")
+async def put_speed_config(req: SpeedProfilesRequest, user: str = Depends(get_current_user)):
+    """Validates + saves speed profiles and/or schedule (keeps the other half)."""
+    if req.profiles is None and req.schedule is None:
+        raise HTTPException(status_code=400, detail="Provide profiles and/or schedule.")
+    try:
+        engine_manager.save_speed_config(profiles=req.profiles, schedule=req.schedule)
+    except ValueError as e:
+        logger.warning(f"[SPEED] User '{user}' speed config rejected: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info(
+        f"[SPEED] User '{user}' saved speed config: {len(engine_manager.speed_profiles)} profiles, "
+        f"{len(engine_manager.speed_schedule)} schedule entries (active={engine_manager.active_speed_profile})"
+    )
+    return {
+        "success": True,
+        "profiles": engine_manager.speed_profiles,
+        "schedule": engine_manager.speed_schedule,
+        "active_profile": engine_manager.active_speed_profile,
+        "global_limit": engine_manager.global_download_limit,
+    }
+
+
+@app.post("/api/speed/override")
+async def post_speed_override(req: SpeedOverrideRequest, user: str = Depends(get_current_user)):
+    """Holds a profile manually (None clears back to schedule)."""
+    try:
+        active = engine_manager.set_speed_override(req.profile)
+    except ValueError as e:
+        logger.warning(f"[SPEED] User '{user}' speed override rejected: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info(f"[SPEED] User '{user}' override -> {req.profile!r} (active={active})")
+    return {"success": True, "active_profile": active, "global_limit": engine_manager.global_download_limit}
 
 
 # --- Subtitles (movies / series in Downloads, English only) ---

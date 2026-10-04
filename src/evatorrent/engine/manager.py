@@ -6,8 +6,9 @@ import logging
 import os
 import re
 import shutil
+import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 from evatorrent.bencoding import bdecode
@@ -29,6 +30,25 @@ class EngineManager:
         self.sessions: Dict[str, TorrentSession] = {}
         self.db = db
         self._monitor = None
+        # Async completion hook (email notification); wired by the web app.
+        self.completion_notifier: Optional[Callable[..., Any]] = None
+        # Auto-updated public tracker fallbacks (trackerslist best-list cache).
+        self.fallback_trackers: List[str] = []
+        self._fallback_checked_at: float = 0.0
+        # Global speed profile state (aggregate cap across all torrents).
+        self.global_download_limit: Optional[int] = None
+        self.active_speed_profile: Optional[str] = None
+        self.speed_profiles: List[dict] = [{"name": "Unlimited", "limit": None}]
+        self.speed_schedule: List[dict] = []
+        self.speed_override: Optional[str] = None
+        self._last_schedule_eval: float = 0.0
+        # Download queue: at most this many torrents download concurrently
+        # (0 = unlimited). Extra torrents wait as QUEUED — this is what stops
+        # several huge torrents from melting a small host at once.
+        try:
+            self.max_active_downloads = int(float(os.environ.get("EVA_MAX_ACTIVE_DOWNLOADS", 2)))
+        except (ValueError, TypeError):
+            self.max_active_downloads = 2
 
     def _data_dir(self) -> Path:
         """Best-effort EVA_DATA_DIR (SQLite parent), used for heartbeat markers."""
@@ -54,6 +74,43 @@ class EngineManager:
             self._monitor.start()
         except Exception as e:
             logger.warning(f"[ENGINE] Resource monitor failed to start: {e}")
+
+    async def refresh_fallback_trackers(self, force: bool = False) -> List[str]:
+        """Loads the cached tracker best-list, refreshing from mirrors when stale.
+
+        Called at boot and daily; failures keep the previous cache (or the
+        baked-in defaults), so enrichment can never break downloading.
+        """
+        from evatorrent.tracker.fallbacks import ensure_fresh_trackers, read_cached
+
+        try:
+            if not force:
+                cached, age_days, source = read_cached(self.download_dir)
+                if cached:
+                    self.fallback_trackers = cached
+                    if age_days <= 7.0:
+                        self._fallback_checked_at = time.time()
+                        logger.debug(f"[TRACKERS] Using cached fallback list ({len(cached)} trackers, {source})")
+                        return cached
+            self.fallback_trackers = await ensure_fresh_trackers(self.download_dir)
+            self._fallback_checked_at = time.time()
+        except Exception as e:
+            logger.warning(f"[TRACKERS] Fallback refresh failed, using baked-in defaults: {e}")
+            if not self.fallback_trackers:
+                try:
+                    cached, _, _ = read_cached(self.download_dir)
+                    self.fallback_trackers = cached
+                except Exception:
+                    self.fallback_trackers = []
+        return self.fallback_trackers
+
+    async def maybe_refresh_fallback_trackers(self) -> None:
+        """Daily refresh check (called from the resource monitor tick)."""
+        try:
+            if time.time() - self._fallback_checked_at >= 86400:
+                await self.refresh_fallback_trackers()
+        except Exception as e:
+            logger.debug(f"[TRACKERS] Daily refresh check skipped: {e}")
 
     def _cache_path(self, info_hash_hex: str) -> Path:
         cache_dir = self.download_dir / ".torrent_cache"
@@ -93,7 +150,15 @@ class EngineManager:
                 )
         except Exception:
             pass
-        session = TorrentSession(torrent=torrent, download_dir=dest_dir, db=self.db)
+        session = TorrentSession(
+            torrent=torrent,
+            download_dir=dest_dir,
+            db=self.db,
+            fallback_trackers=self.fallback_trackers or None,
+        )
+        session.external_throttle = self.is_globally_throttled
+        session.completion_notifier = self.completion_notifier
+        session.on_slot_event = self._promote_queued
         logger.info(
             "[ENGINE] Added '%s' (%.2f GB, %d pieces, %d trackers, max_peers=%d) -> %s",
             torrent.name,
@@ -122,7 +187,7 @@ class EngineManager:
                 magnet_uri=magnet_uri,
             )
 
-        session.start()
+        placement = self._start_or_queue(session)
         if self.db:
             # ...then immediately record the live state so a crash/recreate
             # seconds later still resumes (speed loop only persists every 5s).
@@ -200,6 +265,15 @@ class EngineManager:
         for tr in magnet.trackers:
             if tr not in torrent.trackers:
                 torrent.trackers.append(tr)
+        # Magnet bootstrap: trackerless magnets get the auto-updated best-list
+        # so announces find peers immediately instead of waiting on caches.
+        added = 0
+        for tr in self.fallback_trackers:
+            if tr not in torrent.trackers:
+                torrent.trackers.append(tr)
+                added += 1
+        if added:
+            logger.info(f"[ENGINE] Magnet bootstrap: added {added} fallback trackers to '{torrent.name}'")
 
         logger.info(f"[ENGINE] Successfully enrolled magnet '{torrent.name}' ({len(torrent.trackers)} trackers)")
         return self.add_torrent(torrent, output_dir, magnet_uri=magnet_uri)
@@ -280,12 +354,44 @@ class EngineManager:
                 except Exception:
                     pass
                 self.db.log_event(info_hash_hex, "PAUSED", "Torrent paused by user")
+            self._promote_queued()
             return True
         return False
 
     def resume_torrent(self, info_hash_hex: str) -> bool:
+        from evatorrent.engine.session import TorrentStatus
+
         session = self.get_session(info_hash_hex)
         if session:
+            if session.status == TorrentStatus.QUEUED:
+                # Resume on a queued torrent = jump the queue when a slot is free.
+                if self._slot_free():
+                    session.start()
+                    if self.db:
+                        self.db.log_event(info_hash_hex, "RESUMED", "Queued torrent started by user")
+                    return True
+                logger.info(
+                    f"[QUEUE] '{session.torrent.name}' stays queued #{session.queue_position} (no free slot)"
+                )
+                return True
+            if session.status == TorrentStatus.COMPLETED:
+                session.resume()
+                return True
+            if not self._slot_free() and session.status != TorrentStatus.DOWNLOADING:
+                session.status = TorrentStatus.QUEUED
+                self._refresh_queue_positions()
+                if self.db:
+                    try:
+                        self.db.update_torrent_progress(
+                            info_hash_hex,
+                            session.piece_manager.bytes_downloaded,
+                            session.piece_manager.bytes_uploaded,
+                            "queued",
+                        )
+                    except Exception:
+                        pass
+                logger.info(f"[QUEUE] '{session.torrent.name}' queued #{session.queue_position} (slots full)")
+                return True
             session.resume()
             if self.db:
                 try:
@@ -373,23 +479,30 @@ class EngineManager:
                     dest_dir = p
             except Exception:
                 dest_dir = self.download_dir
-        # Restore persisted per-file selection BEFORE init so deselected
+        # Restore persisted per-file priorities BEFORE init so deselected
         # pieces are never hashed or requested after a restart.
-        restored_selection: Optional[List[str]] = None
+        restored_prio: Optional[Dict[str, int]] = None
         if self.db:
             try:
-                restored_selection = self.db.get_file_selection(info_hash_hex)
-                if restored_selection is not None:
+                restored_prio = self.db.get_effective_file_priorities(
+                    info_hash_hex, [f.path for f in torrent.files]
+                )
+                if restored_prio:
+                    n_high = sum(1 for v in restored_prio.values() if v == 2)
+                    n_skip = sum(1 for v in restored_prio.values() if v == 0)
                     logger.info(
-                        f"[ENGINE] Restoring file selection for '{torrent.name}': "
-                        f"{len(restored_selection)} files selected"
+                        f"[ENGINE] Restoring file priorities for '{torrent.name}': "
+                        f"{n_high} high, {n_skip} skipped"
                     )
             except Exception as e:
-                logger.warning(f"[ENGINE] Failed reading file selection for {info_hash_hex[:8]}: {e}")
+                logger.warning(f"[ENGINE] Failed reading file priorities for {info_hash_hex[:8]}: {e}")
         try:
             session = TorrentSession(
-                torrent=torrent, download_dir=dest_dir, db=self.db, selected_files=restored_selection
+                torrent=torrent, download_dir=dest_dir, db=self.db, file_priorities=restored_prio,
+                fallback_trackers=self.fallback_trackers or None,
             )
+            session.external_throttle = self.is_globally_throttled
+            session.completion_notifier = self.completion_notifier
         except Exception as e:
             logger.warning(f"[ENGINE] Failed to init session for {info_hash_hex[:8]}: {e}")
             return None
@@ -413,8 +526,13 @@ class EngineManager:
                 self.db.log_event(
                     info_hash_hex, "RESUMED", "Session rebuilt from DB in paused state (auto-resume on boot)"
                 )
+        elif prev_status == "queued":
+            session.status = session.status.__class__("queued")
+            self._refresh_queue_positions()
+            if self.db:
+                self.db.log_event(info_hash_hex, "QUEUED", "Session rebuilt from DB in queued state")
         else:
-            session.start()
+            placement = self._start_or_queue(session, reason="auto-resume after restart")
             if self.db:
                 # Refresh progress baseline so Analytics stops showing stale rows.
                 try:
@@ -422,21 +540,23 @@ class EngineManager:
                         info_hash_hex,
                         session.piece_manager.bytes_downloaded,
                         session.piece_manager.bytes_uploaded,
-                        "downloading",
+                        session.status.value,
                     )
                 except Exception:
                     pass
-                self.db.log_event(info_hash_hex, "RESUMED", "Session auto-resumed after restart")
+                self.db.log_event(
+                    info_hash_hex, "RESUMED", f"Session auto-resumed after restart ({placement})"
+                )
         return session
 
     async def restore_from_db(self) -> dict:
         """Rebuilds interrupted sessions from SQLite. Called once at server boot.
 
-        Returns summary counts: {restored, paused, completed, skipped}.
+        Returns summary counts: {restored, paused, queued, completed, skipped}.
         Never raises — per-torrent failures are logged and skipped so one bad
         row cannot prevent the rest of the swarm from resuming.
         """
-        summary = {"restored": 0, "paused": 0, "completed": 0, "skipped": 0}
+        summary = {"restored": 0, "paused": 0, "queued": 0, "completed": 0, "skipped": 0}
         if not self.db:
             return summary
         try:
@@ -461,6 +581,8 @@ class EngineManager:
                         summary["completed"] += 1
                     elif st == "paused":
                         summary["paused"] += 1
+                    elif st == "queued":
+                        summary["queued"] += 1
                     else:
                         summary["restored"] += 1
                 else:
@@ -470,6 +592,93 @@ class EngineManager:
                 summary["skipped"] += 1
         logger.info(f"[ENGINE] Auto-resume summary: {summary}")
         return summary
+
+    def active_download_count(self) -> int:
+        from evatorrent.engine.session import TorrentStatus
+
+        return sum(1 for s in self.sessions.values() if s.status == TorrentStatus.DOWNLOADING)
+
+    def queued_sessions(self) -> List[TorrentSession]:
+        from evatorrent.engine.session import TorrentStatus
+
+        return [s for s in self.sessions.values() if s.status == TorrentStatus.QUEUED]
+
+    def _refresh_queue_positions(self) -> None:
+        for pos, s in enumerate(self.queued_sessions(), start=1):
+            s.queue_position = pos
+        for s in self.sessions.values():
+            from evatorrent.engine.session import TorrentStatus
+
+            if s.status != TorrentStatus.QUEUED:
+                s.queue_position = None
+
+    def _slot_free(self) -> bool:
+        return self.max_active_downloads <= 0 or self.active_download_count() < self.max_active_downloads
+
+    def _start_or_queue(self, session: TorrentSession, reason: str = "added") -> str:
+        """Starts the session now or parks it as QUEUED. Returns 'started'|'queued'."""
+        from evatorrent.engine.session import TorrentStatus
+
+        session.on_slot_event = self._promote_queued
+        if session.piece_manager.is_complete:
+            session.start()
+            return "started"
+        if not self._slot_free():
+            session.status = TorrentStatus.QUEUED
+            self._refresh_queue_positions()
+            if self.db:
+                try:
+                    self.db.update_torrent_progress(
+                        session.torrent.info_hash_hex,
+                        session.piece_manager.bytes_downloaded,
+                        session.piece_manager.bytes_uploaded,
+                        "queued",
+                    )
+                except Exception:
+                    pass
+            logger.info(
+                "[QUEUE] '%s' (%s) queued #%d (%s; %d active, max %d)",
+                session.torrent.name,
+                session.torrent.info_hash_hex[:8],
+                session.queue_position or 0,
+                reason,
+                self.active_download_count(),
+                self.max_active_downloads,
+            )
+            return "queued"
+        session.start()
+        return "started"
+
+    def _promote_queued(self) -> None:
+        """Starts waiting torrents while download slots are free (FIFO)."""
+        try:
+            while self._slot_free():
+                queued = self.queued_sessions()
+                if not queued:
+                    break
+                nxt = queued[0]
+                nxt.start()
+                logger.info(
+                    "[QUEUE] Promoted '%s' (%s) from queue (%d active, max %d)",
+                    nxt.torrent.name,
+                    nxt.torrent.info_hash_hex[:8],
+                    self.active_download_count(),
+                    self.max_active_downloads,
+                )
+                if self.db:
+                    try:
+                        self.db.update_torrent_progress(
+                            nxt.torrent.info_hash_hex,
+                            nxt.piece_manager.bytes_downloaded,
+                            nxt.piece_manager.bytes_uploaded,
+                            "downloading",
+                        )
+                        self.db.log_event(nxt.torrent.info_hash_hex, "RESUMED", "Promoted from download queue")
+                    except Exception:
+                        pass
+            self._refresh_queue_positions()
+        except Exception as e:
+            logger.warning(f"[QUEUE] Promotion failed: {e}")
 
     def set_speed_limit(self, info_hash_hex: str, limit_bytes_per_sec: Optional[int]) -> bool:
         session = self.get_session(info_hash_hex)
@@ -485,11 +694,119 @@ class EngineManager:
             return None
         return session.set_selected_files(selected_paths)
 
+    def set_file_priorities(self, info_hash_hex: str, priorities: Dict[str, int]) -> Optional[dict]:
+        """Updates per-file priorities; returns summary or None when unknown."""
+        session = self.get_session(info_hash_hex)
+        if not session:
+            return None
+        return session.set_file_priorities(priorities)
+
+    def is_globally_throttled(self) -> bool:
+        """True when aggregate download speed hits the active profile cap."""
+        if not self.global_download_limit or self.global_download_limit <= 0:
+            return False
+        total = sum(s.download_speed for s in self.sessions.values())
+        return total >= self.global_download_limit
+
+    def set_global_download_limit(self, limit_bytes_per_sec: Optional[int]) -> None:
+        self.global_download_limit = limit_bytes_per_sec if (limit_bytes_per_sec and limit_bytes_per_sec > 0) else None
+        for session in self.sessions.values():
+            session.external_throttle = self.is_globally_throttled
+
+    def load_speed_config(self) -> None:
+        """Loads profiles/schedule/override from DB (safe defaults when absent)."""
+        try:
+            from evatorrent.engine.speed import load_speed_config
+
+            profiles, schedule, override = load_speed_config(self.db)
+            self.speed_profiles = profiles
+            self.speed_schedule = schedule
+            self.speed_override = override or None
+        except Exception as e:
+            logger.warning(f"[SPEED] Failed loading speed config: {e}")
+
+    def save_speed_config(self, profiles: Optional[List[dict]] = None, schedule: Optional[List[dict]] = None) -> None:
+        """Validates + persists profiles/schedule, then re-evaluates the active cap."""
+        import json
+
+        from evatorrent.engine.speed import validate_profiles, validate_schedule
+
+        if profiles is not None:
+            profiles = validate_profiles(profiles)
+            self.speed_profiles = profiles
+            if self.db:
+                self.db.set_setting("speed_profiles", json.dumps(profiles))
+        if schedule is not None:
+            schedule = validate_schedule(schedule, [p["name"] for p in self.speed_profiles])
+            self.speed_schedule = schedule
+            if self.db:
+                self.db.set_setting("speed_schedule", json.dumps(schedule))
+        self.evaluate_speed_schedule(force=True)
+
+    def set_speed_override(self, profile_name: Optional[str]) -> Optional[str]:
+        """Manual profile hold (None = back to schedule). Persists across restarts."""
+        if profile_name is not None:
+            if not any(p["name"].lower() == profile_name.lower() for p in self.speed_profiles):
+                raise ValueError(f"Unknown speed profile: {profile_name}")
+        self.speed_override = profile_name
+        if self.db:
+            try:
+                self.db.set_setting("speed_override", profile_name or "")
+            except Exception:
+                pass
+        self.evaluate_speed_schedule(force=True)
+        return self.active_speed_profile
+
+    def evaluate_speed_schedule(self, force: bool = False) -> Optional[str]:
+        """Applies override-or-schedule to the global cap. Returns active profile name."""
+        from evatorrent.engine.speed import match_schedule, profile_limit
+
+        now = time.time()
+        if not force and now - self._last_schedule_eval < 60:
+            return self.active_speed_profile
+        self._last_schedule_eval = now
+        previous = (self.active_speed_profile, self.global_download_limit)
+        if self.speed_override:
+            limit = profile_limit(self.speed_profiles, self.speed_override)
+            self.active_speed_profile = self.speed_override
+            self.set_global_download_limit(limit)
+        elif self.speed_schedule:
+            matched = match_schedule(self.speed_schedule)
+            if matched:
+                self.active_speed_profile = matched
+                self.set_global_download_limit(profile_limit(self.speed_profiles, matched))
+            else:
+                self.active_speed_profile = None
+                self.set_global_download_limit(None)
+        else:
+            self.active_speed_profile = None
+            self.set_global_download_limit(None)
+        current = (self.active_speed_profile, self.global_download_limit)
+        if current != previous:
+            if self.active_speed_profile:
+                logger.info(
+                    "[SPEED] Active profile '%s' (cap %s)",
+                    self.active_speed_profile,
+                    f"{self.global_download_limit / 1024 / 1024:.1f} MB/s"
+                    if self.global_download_limit
+                    else "unlimited",
+                )
+            else:
+                logger.info("[SPEED] Schedule idle: no cap (unlimited)")
+        return self.active_speed_profile
+
+    async def maybe_evaluate_schedule(self) -> None:
+        """Minute-granularity scheduler tick (called from the monitor loop)."""
+        try:
+            self.evaluate_speed_schedule()
+        except Exception as e:
+            logger.debug(f"[SPEED] Schedule tick skipped: {e}")
+
     async def remove_torrent(self, info_hash_hex: str, delete_files: bool = False) -> bool:
         key = info_hash_hex.lower()
         session = self.sessions.pop(key, None)
         if session:
-            await session.stop()
+            await session.stop(notify_slot=False)
 
             if self.db:
                 self.db.mark_torrent_removed(
@@ -501,6 +818,8 @@ class EngineManager:
 
             if delete_files:
                 self._delete_session_files(session)
+            self._refresh_queue_positions()
+            self._promote_queued()
             return True
         # DB-only fallback: a 💾 saved row with no live session (e.g. pending
         # after restart, or cached metainfo missing). Remove the DB row so the
@@ -579,7 +898,7 @@ class EngineManager:
                     pass
         for session in list(self.sessions.values()):
             try:
-                await session.stop()
+                await session.stop(notify_slot=False)
             except Exception:
                 pass
         self.sessions.clear()

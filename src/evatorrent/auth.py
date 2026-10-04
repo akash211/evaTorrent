@@ -335,9 +335,42 @@ class EmailSender:
             msg.attach(MIMEText(text_content, "plain"))
             msg.attach(MIMEText(html_content, "html"))
 
+            return self._deliver(msg, recipient_email)
+        except Exception as e:
+            logger.error(f"Failed to send SMTP email to {recipient_email}: {e}")
+            return False
+
+    async def send_notification(self, recipient_email: str, subject: str, text_body: str) -> bool:
+        """Sends a plain-text notification email (e.g. download complete).
+
+        Returns False (and logs) when SMTP is unconfigured — completion is
+        still recorded in docker logs + torrent events by the caller.
+        """
+        if not self.config.is_smtp_configured:
+            logger.debug(f"Skipping completion email to {recipient_email}: SMTP not configured")
+            return False
+        return await asyncio.to_thread(self._send_notification_sync, recipient_email, subject, text_body)
+
+    def _send_notification_sync(self, recipient_email: str, subject: str, text_body: str) -> bool:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = self.config.smtp_from
+            msg["To"] = recipient_email
+            msg.attach(MIMEText(text_body, "plain"))
+            return self._deliver(msg, recipient_email)
+        except Exception as e:
+            logger.error(f"Failed to send notification email to {recipient_email}: {e}")
+            return False
+
+    def _deliver(self, msg, recipient_email: str) -> bool:
+        """Delivers a pre-built MIME message via the configured SMTP relay."""
+        try:
             host = self.config.smtp_host
             port = self.config.smtp_port
-
+            if not host:
+                logger.warning("Cannot deliver email: SMTP host not configured")
+                return False
             if port == 465:
                 with smtplib.SMTP_SSL(host, port, timeout=10.0) as server:
                     if self.config.smtp_user and self.config.smtp_password:
@@ -350,7 +383,7 @@ class EmailSender:
                         server.login(self.config.smtp_user, self.config.smtp_password)
                     server.send_message(msg)
 
-            logger.info(f"Successfully sent OTP email to {recipient_email} via {host}:{port}")
+            logger.info(f"Successfully sent email '{msg['Subject']}' to {recipient_email} via {host}:{port}")
             return True
         except Exception as e:
             logger.error(f"Failed to send SMTP email to {recipient_email}: {e}")

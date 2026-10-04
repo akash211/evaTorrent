@@ -243,6 +243,14 @@ class ResourceMonitor:
                 if self.data_dir and time.time() - self._last_beat >= self.heartbeat_interval:
                     self._last_beat = time.time()
                     write_heartbeat(self.data_dir)
+                try:
+                    await self.manager.maybe_refresh_fallback_trackers()
+                except Exception:
+                    pass
+                try:
+                    await self.manager.maybe_evaluate_schedule()
+                except Exception:
+                    pass
         except asyncio.CancelledError:
             pass
         except Exception as e:
