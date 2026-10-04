@@ -28,6 +28,7 @@ class PieceManager:
         torrent: Torrent,
         download_dir: Path,
         on_piece_complete: Optional[Callable[[int], None]] = None,
+        selected_files: Optional[List[str]] = None,
     ):
         self.torrent = torrent
         self.disk_writer = DiskWriter(torrent, download_dir)
@@ -46,6 +47,11 @@ class PieceManager:
         self.missing_pieces: Set[int] = set(range(torrent.piece_count))
         self.ongoing_pieces: Set[int] = set()
         self.completed_pieces: Set[int] = set()
+        # Pieces excluded by per-file selection (never requested/hashed).
+        self.skipped_pieces: Set[int] = set()
+        # None = all files selected. Otherwise the set of selected file paths.
+        self.selected_files: Optional[Set[str]] = None
+        self.selected_bytes: int = torrent.total_length
 
         # Peer availability mapping: peer_key -> Set of piece indices,
         # or None meaning "seeder has everything" (avoids duplicating a
@@ -60,15 +66,117 @@ class PieceManager:
         self.bytes_downloaded: int = 0
         self.bytes_uploaded: int = 0
 
+        if selected_files is not None:
+            self._apply_selection(set(selected_files))
+
     @property
     def is_complete(self) -> bool:
-        return len(self.completed_pieces) == self.torrent.piece_count
+        # Selected-only completion: skipped (deselected) pieces don't block it.
+        return not self.missing_pieces and not self.ongoing_pieces
 
     @property
     def progress_percentage(self) -> float:
-        if self.torrent.piece_count == 0:
+        selected_total = self.torrent.piece_count - len(self.skipped_pieces)
+        if selected_total <= 0:
             return 100.0
-        return (len(self.completed_pieces) / self.torrent.piece_count) * 100.0
+        done = len(self.completed_pieces - self.skipped_pieces)
+        return (done / selected_total) * 100.0
+
+    @property
+    def selected_total_bytes(self) -> int:
+        return self.selected_bytes
+
+    def _pieces_overlapping_files(self, paths: Set[str]) -> Set[int]:
+        """Returns piece indices overlapping any of the given torrent file paths."""
+        wanted = set(paths)
+        out: Set[int] = set()
+        for f in self.torrent.files:
+            if f.path not in wanted:
+                continue
+            first = f.offset // self.torrent.piece_length
+            last = (f.offset + max(f.length, 1) - 1) // self.torrent.piece_length
+            out.update(range(first, min(last, self.torrent.piece_count - 1) + 1))
+        return out
+
+    def is_file_selected(self, path: str) -> bool:
+        return self.selected_files is None or path in self.selected_files
+
+    def _recompute_selected_bytes(self) -> None:
+        if self.selected_files is None:
+            self.selected_bytes = self.torrent.total_length
+            return
+        skip = self.skipped_pieces
+        total = 0
+        for i in range(self.torrent.piece_count):
+            if i not in skip:
+                total += self.torrent.piece_size(i)
+        self.selected_bytes = total
+
+    def _apply_selection(self, selected: Set[str]) -> None:
+        """Recomputes skipped pieces for a new file selection (internal).
+
+        Pieces fully covered by deselected files move to skipped_pieces;
+        in-flight ones are reset (with byte accounting) so they can be
+        re-requested if re-selected later.
+        """
+        all_paths = {f.path for f in self.torrent.files}
+        unknown = set(selected) - all_paths
+        if unknown:
+            raise ValueError(f"Unknown files in selection: {sorted(unknown)[:5]}")
+        if not selected:
+            raise ValueError("At least one file must stay selected.")
+        keep_pieces = self._pieces_overlapping_files(selected)
+        new_skipped = set(range(self.torrent.piece_count)) - keep_pieces
+        # Reset in-flight pieces that are now fully skipped (refund bytes so a
+        # later re-select doesn't double-count them on re-download).
+        for piece_idx in list(self.ongoing_pieces):
+            if piece_idx in new_skipped:
+                piece = self.pieces[piece_idx]
+                refunded = sum(b.length for b in piece.blocks if b.is_complete)
+                self.bytes_downloaded = max(0, self.bytes_downloaded - refunded)
+                piece.reset()
+                self.ongoing_pieces.discard(piece_idx)
+        self.missing_pieces -= new_skipped
+        self.skipped_pieces = new_skipped
+        # Completed pieces stay completed (their bytes are on disk); a piece
+        # completed before deselect keeps its data only until release below.
+        for piece_idx in list(self.completed_pieces):
+            if piece_idx in new_skipped:
+                self.pieces[piece_idx].reset()
+        self.selected_files = set(selected)
+        self._recompute_selected_bytes()
+        self._rarity_computed_at = 0.0
+
+    def set_selected_files(self, selected_paths: Optional[List[str]]) -> dict:
+        """Public file-selection update. None (or all paths) = select everything.
+
+        Returns a summary dict for API/logging.
+        """
+        all_paths = [f.path for f in self.torrent.files]
+        if selected_paths is None or set(selected_paths) == set(all_paths):
+            self.selected_files = None
+            self.skipped_pieces.clear()
+            self.missing_pieces |= set(range(self.torrent.piece_count)) - self.completed_pieces - self.ongoing_pieces
+            self._recompute_selected_bytes()
+            self._rarity_computed_at = 0.0
+            # Re-verify nothing: previously skipped pieces were never hashed;
+            # they re-enter missing and download normally.
+            return {
+                "selected_count": len(all_paths),
+                "total_count": len(all_paths),
+                "skipped_pieces": 0,
+            }
+        before = len(self.skipped_pieces)
+        self._apply_selection(set(selected_paths))
+        # If everything selected again via explicit list, normalize to None.
+        if not self.skipped_pieces:
+            self.selected_files = None
+        return {
+            "selected_count": len(self.selected_files or all_paths),
+            "total_count": len(all_paths),
+            "skipped_pieces": len(self.skipped_pieces),
+            "skipped_delta": len(self.skipped_pieces) - before,
+        }
 
     def add_peer(self, peer_key: str, bitfield: Bitfield) -> None:
         """Records the pieces advertised by a peer via Bitfield."""
@@ -200,6 +308,8 @@ class PieceManager:
             )
         next_log_at = 0.1
         for idx, piece in enumerate(self.pieces):
+            if idx in self.skipped_pieces:
+                continue  # deselected files: never hashed, never downloaded
             try:
                 data = self.disk_writer.read_piece(idx)
                 if len(data) != piece.length:
@@ -373,19 +483,26 @@ class PieceManager:
             if piece.verify_hash():
                 # Write to disk
                 self.disk_writer.write_piece(index, piece.get_data())
+                # Release the piece buffer immediately: completed pieces kept
+                # their full data in heap forever, which OOM-killed a 4 GB
+                # container on a 158 GB torrent (16 MB pieces x 100s retained).
+                # Served-from-disk reads (seeding) re-read per block instead.
+                piece.reset()
                 if index in self.ongoing_pieces:
                     self.ongoing_pieces.remove(index)
                 if index in self.missing_pieces:
                     self.missing_pieces.remove(index)
                 self.completed_pieces.add(index)
-                logger.info(
-                    f"Piece {index}/{self.torrent.piece_count} verified & saved. "
-                    f"Progress: {self.progress_percentage:.1f}%"
-                )
+                if self.torrent.piece_count < 2000 or index % 50 == 0 or self.is_complete:
+                    logger.info(
+                        f"Piece {index}/{self.torrent.piece_count} verified & saved. "
+                        f"Progress: {self.progress_percentage:.1f}%"
+                    )
 
-                # If all pieces are complete, finalize files (remove .part extensions)
+                # If all (selected) pieces are complete, finalize files (remove .part extensions)
                 if self.is_complete:
-                    self.disk_writer.finalize()
+                    selected = None if self.selected_files is None else set(self.selected_files)
+                    self.disk_writer.finalize(selected_paths=selected)
 
                 if self.on_piece_complete:
                     self.on_piece_complete(index)

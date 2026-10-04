@@ -74,6 +74,7 @@ class TorrentSession:
         port: int = 6881,
         download_limit: Optional[int] = None,  # Bytes/sec, None or 0 for unlimited
         db: Optional[Database] = None,
+        selected_files: Optional[list] = None,
     ):
         self.torrent = torrent
         self.download_dir = Path(download_dir)
@@ -105,6 +106,7 @@ class TorrentSession:
             torrent=torrent,
             download_dir=self.download_dir,
             on_piece_complete=self._on_piece_completed,
+            selected_files=selected_files,
         )
         self.tracker_manager = TrackerManager(torrent.trackers, port=port, add_fallbacks=True)
 
@@ -146,6 +148,25 @@ class TorrentSession:
     def set_download_limit(self, limit_bytes_per_sec: Optional[int]) -> None:
         """Sets or clears the download rate limit for this torrent."""
         self.download_limit = limit_bytes_per_sec if (limit_bytes_per_sec and limit_bytes_per_sec > 0) else None
+
+    def set_selected_files(self, selected_paths: Optional[list]) -> dict:
+        """Selects which files to download (None = all). Persists to DB."""
+        summary = self.piece_manager.set_selected_files(selected_paths)
+        if self.db:
+            try:
+                self.db.set_file_selection(self.torrent.info_hash_hex, self.piece_manager.selected_files)
+                self.db.log_event(
+                    self.torrent.info_hash_hex,
+                    "FILES",
+                    f"File selection updated: {summary['selected_count']}/{summary['total_count']} files, "
+                    f"{len(self.piece_manager.skipped_pieces)} pieces skipped",
+                )
+            except Exception:
+                pass
+        # A selection change can complete (or un-complete) the torrent.
+        if self.piece_manager.is_complete and self._running:
+            asyncio.create_task(self._stop_seeding_and_complete())
+        return summary
 
     def start(self) -> None:
         if self._running:
@@ -494,8 +515,18 @@ class TorrentSession:
             "piece_length": self.torrent.piece_length,
             "is_multi_file": self.torrent.is_multi_file,
             "max_peers": self.max_peers,
-            "files": [{"path": f.path, "length": f.length, "offset": f.offset} for f in files[:500]],
+            "files": [
+                {
+                    "path": f.path,
+                    "length": f.length,
+                    "offset": f.offset,
+                    "selected": self.piece_manager.is_file_selected(f.path),
+                }
+                for f in files[:500]
+            ],
             "files_truncated": truncated,
             "files_total": len(files),
+            "selected_bytes": self.piece_manager.selected_total_bytes,
+            "skipped_pieces": len(self.piece_manager.skipped_pieces),
             "trackers": self.torrent.trackers,
         }

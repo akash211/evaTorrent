@@ -129,6 +129,7 @@ async def lifespan(app: FastAPI):
         _limits.VERIFY_ON_STARTUP,
         _limits.LARGE_TORRENT_BYTES // (1024**3),
     )
+    engine_manager.start_monitor()
     try:
         summary = await engine_manager.restore_from_db()
         logger.info(f"[STARTUP] Swarm auto-resume from DB: {summary}")
@@ -712,6 +713,73 @@ async def set_torrent_speed_limit(
         raise HTTPException(status_code=404, detail="Torrent not found")
     logger.info(f"[TORRENT] User '{user}' set download_limit={req.download_limit} B/s on {info_hash[:8]}")
     return {"success": True, "download_limit": req.download_limit}
+
+
+class FileSelectionRequest(BaseModel):
+    selected_paths: Optional[list] = None  # None or full list = all files
+
+
+@app.get("/api/torrents/{info_hash}/files")
+async def get_torrent_files(
+    info_hash: str,
+    user: str = Depends(get_current_user),
+):
+    """Lists torrent files with per-file selection state."""
+    session = engine_manager.get_session(info_hash)
+    if not session:
+        raise HTTPException(status_code=404, detail="Torrent not found")
+    return {
+        "files": [
+            {
+                "path": f.path,
+                "length": f.length,
+                "offset": f.offset,
+                "selected": session.piece_manager.is_file_selected(f.path),
+            }
+            for f in session.torrent.files
+        ],
+        "selected_bytes": session.piece_manager.selected_total_bytes,
+        "total_bytes": session.torrent.total_length,
+    }
+
+
+@app.post("/api/torrents/{info_hash}/files")
+async def set_torrent_files(
+    info_hash: str,
+    req: FileSelectionRequest,
+    user: str = Depends(get_current_user),
+):
+    """Selects which files to download (deselect the rest). At least one required."""
+    session = engine_manager.get_session(info_hash)
+    if not session:
+        # DB-only row: persist selection so the rebuild honors it.
+        row = database.get_torrent_history(info_hash)
+        if not row:
+            raise HTTPException(status_code=404, detail="Torrent not found")
+        if engine_manager.db:
+            try:
+                engine_manager.db.set_file_selection(info_hash, req.selected_paths)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to persist selection: {e}")
+        logger.info(f"[TORRENT] User '{user}' staged file selection for {info_hash[:8]} (source=db)")
+        return {"success": True, "source": "db"}
+    try:
+        summary = engine_manager.set_file_selection(info_hash, req.selected_paths)
+    except ValueError as e:
+        logger.warning(f"[TORRENT] User '{user}' file selection rejected for {info_hash[:8]}: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Torrent not found")
+    logger.info(
+        "[TORRENT] User '%s' set file selection on '%s' (%s): %d/%d files, %d pieces skipped",
+        user,
+        session.torrent.name,
+        info_hash[:8],
+        summary["selected_count"],
+        summary["total_count"],
+        summary["skipped_pieces"],
+    )
+    return {"success": True, **summary}
 
 
 @app.delete("/api/torrents/{info_hash}")

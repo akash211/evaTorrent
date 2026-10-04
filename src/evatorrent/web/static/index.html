@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="/static/style.css?v=0.9.0" />
+  <link rel="stylesheet" href="/static/style.css?v=0.9.1" />
 </head>
 <body>
   <div class="app-container">
@@ -27,7 +27,7 @@
         </div>
         <div class="brand-text">
           <h1>evaTorrent</h1>
-          <span class="version-tag">v0.9.0 • Asyncio Core</span>
+          <span class="version-tag">v0.9.1 • Asyncio Core</span>
         </div>
       </div>
 
@@ -602,6 +602,18 @@
 
           <!-- Tab: Files -->
           <div id="tab-files" class="tab-content">
+            <div id="files-toolbar" class="files-toolbar hidden">
+              <span id="files-sel-count" class="files-sel-count">0/0 selected</span>
+              <div class="files-toolbar-actions">
+                <button class="btn btn-secondary btn-sm" onclick="setAllFilesChecked(true)">Select all</button>
+                <button class="btn btn-secondary btn-sm" onclick="setAllFilesChecked(false)">Select none</button>
+              </div>
+              <div id="files-apply-bar" class="files-apply-bar hidden">
+                <span class="unsaved-dot"></span> Unsaved selection
+                <button class="btn btn-primary btn-sm" onclick="applyFileSelection()">Apply & download selected</button>
+                <button class="btn btn-secondary btn-sm" onclick="resetFileSelection()">Reset</button>
+              </div>
+            </div>
             <ul id="files-list" class="files-list"></ul>
           </div>
         </div>
@@ -775,6 +787,6 @@
     </nav>
   </div>
 
-  <script src="/static/app.js?v=0.9.0"></script>
+  <script src="/static/app.js?v=0.9.1"></script>
 </body>
 </html>

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Set
 
 from evatorrent.torrent import FileInfo, Torrent
 
@@ -78,9 +78,15 @@ class DiskWriter:
         if bytes_written != len(data):
             logger.warning(f"Piece {piece_index}: Expected to write {len(data)} bytes, wrote {bytes_written}")
 
-    def finalize(self) -> None:
-        """Renames all .part files to their final filenames once download is verified."""
+    def finalize(self, selected_paths: Optional[Set[str]] = None) -> None:
+        """Renames .part files to their final filenames once download is verified.
+
+        Only selected files are finalized; deselected files keep their .part
+        state so a later re-select resumes them cleanly.
+        """
         for f in self.files:
+            if selected_paths is not None and f.path not in selected_paths:
+                continue
             part_path = self.output_dir / f"{f.path}.part"
             final_path = self.output_dir / f.path
             if part_path.exists():

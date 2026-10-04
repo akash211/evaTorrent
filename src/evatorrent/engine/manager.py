@@ -28,6 +28,32 @@ class EngineManager:
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: Dict[str, TorrentSession] = {}
         self.db = db
+        self._monitor = None
+
+    def _data_dir(self) -> Path:
+        """Best-effort EVA_DATA_DIR (SQLite parent), used for heartbeat markers."""
+        try:
+            if self.db and getattr(self.db, "db_path", None):
+                return Path(self.db.db_path).parent
+        except Exception:
+            pass
+        return self.download_dir
+
+    def start_monitor(self) -> None:
+        """Starts crash forensics + RSS watchdog (called once at server boot)."""
+        try:
+            from evatorrent.engine.monitor import (
+                check_previous_shutdown,
+                log_cgroup_boot_line,
+            )
+            from evatorrent.engine.monitor import ResourceMonitor
+
+            log_cgroup_boot_line()
+            check_previous_shutdown(self._data_dir())
+            self._monitor = ResourceMonitor(self, self._data_dir())
+            self._monitor.start()
+        except Exception as e:
+            logger.warning(f"[ENGINE] Resource monitor failed to start: {e}")
 
     def _cache_path(self, info_hash_hex: str) -> Path:
         cache_dir = self.download_dir / ".torrent_cache"
@@ -347,8 +373,23 @@ class EngineManager:
                     dest_dir = p
             except Exception:
                 dest_dir = self.download_dir
+        # Restore persisted per-file selection BEFORE init so deselected
+        # pieces are never hashed or requested after a restart.
+        restored_selection: Optional[List[str]] = None
+        if self.db:
+            try:
+                restored_selection = self.db.get_file_selection(info_hash_hex)
+                if restored_selection is not None:
+                    logger.info(
+                        f"[ENGINE] Restoring file selection for '{torrent.name}': "
+                        f"{len(restored_selection)} files selected"
+                    )
+            except Exception as e:
+                logger.warning(f"[ENGINE] Failed reading file selection for {info_hash_hex[:8]}: {e}")
         try:
-            session = TorrentSession(torrent=torrent, download_dir=dest_dir, db=self.db)
+            session = TorrentSession(
+                torrent=torrent, download_dir=dest_dir, db=self.db, selected_files=restored_selection
+            )
         except Exception as e:
             logger.warning(f"[ENGINE] Failed to init session for {info_hash_hex[:8]}: {e}")
             return None
@@ -437,6 +478,13 @@ class EngineManager:
             return True
         return False
 
+    def set_file_selection(self, info_hash_hex: str, selected_paths: Optional[List[str]]) -> Optional[dict]:
+        """Updates per-file download selection; returns summary or None when unknown."""
+        session = self.get_session(info_hash_hex)
+        if not session:
+            return None
+        return session.set_selected_files(selected_paths)
+
     async def remove_torrent(self, info_hash_hex: str, delete_files: bool = False) -> bool:
         key = info_hash_hex.lower()
         session = self.sessions.pop(key, None)
@@ -504,6 +552,11 @@ class EngineManager:
 
     async def shutdown(self) -> None:
         """Stops all running torrent sessions, persisting progress first."""
+        try:
+            if self._monitor:
+                await self._monitor.stop()
+        except Exception:
+            pass
         if self.db:
             for key, session in list(self.sessions.items()):
                 try:
@@ -530,6 +583,12 @@ class EngineManager:
             except Exception:
                 pass
         self.sessions.clear()
+        try:
+            from evatorrent.engine.monitor import mark_clean_shutdown
+
+            mark_clean_shutdown(self._data_dir())
+        except Exception:
+            pass
 
     def get_all_torrents(self) -> List[dict]:
         return [s.to_dict() for s in self.sessions.values()]

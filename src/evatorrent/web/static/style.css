@@ -628,6 +628,76 @@ body {
   border: 1px solid var(--border-color);
 }
 
+.files-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 0.8rem;
+}
+
+.files-sel-count {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.files-toolbar-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.files-apply-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 193, 7, 0.12);
+  border: 1px solid rgba(255, 193, 7, 0.4);
+  font-size: 0.78rem;
+}
+
+.unsaved-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ffc107;
+  display: inline-block;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.file-row input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-primary, #22d3ee);
+  cursor: pointer;
+}
+
+.file-row .file-path {
+  flex: 1;
+  cursor: pointer;
+}
+
+.file-row .file-size {
+  float: none;
+  white-space: nowrap;
+}
+
+.file-row.file-deselected {
+  opacity: 0.55;
+}
+
+.file-row.file-deselected .file-path {
+  text-decoration: line-through;
+}
+
 /* Piece Map Visualizer */
 .piece-map-meta {
   display: flex;

@@ -13,6 +13,11 @@ BLOCK_SIZE = 16384  # 16 KiB
 class Block:
     """Represents a single requestable block within a piece."""
 
+    # __slots__: a 155 GB torrent materializes ~10M Block objects; slots cut
+    # per-object overhead roughly in half (this plus Piece objects alone was
+    # ~1 GB of heap on a 10k-piece torrent).
+    __slots__ = ("piece_index", "begin", "length", "data", "requested_time")
+
     def __init__(self, piece_index: int, begin: int, length: int):
         self.piece_index = piece_index
         self.begin = begin
@@ -34,6 +39,8 @@ class Block:
 
 class Piece:
     """Represents a piece of the torrent consisting of multiple blocks."""
+
+    __slots__ = ("index", "length", "expected_hash", "blocks")
 
     def __init__(self, index: int, length: int, expected_hash: bytes):
         self.index = index

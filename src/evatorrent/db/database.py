@@ -99,6 +99,8 @@ class Database:
                     conn.execute("ALTER TABLE torrents_history ADD COLUMN magnet_uri TEXT")
                 if "download_dir" not in cols:
                     conn.execute("ALTER TABLE torrents_history ADD COLUMN download_dir TEXT")
+                if "file_selection" not in cols:
+                    conn.execute("ALTER TABLE torrents_history ADD COLUMN file_selection TEXT")
             except Exception as e:
                 logger.warning(f"DB migration check failed: {e}")
 
@@ -399,6 +401,35 @@ class Database:
                 "UPDATE torrents_history SET magnet_uri = ? WHERE info_hash = ?",
                 (magnet_uri, info_hash.lower()),
             )
+
+    def set_file_selection(self, info_hash: str, selected_files: Optional[set | list]) -> None:
+        """Persists per-file download selection (JSON list of paths; NULL = all)."""
+        import json
+
+        payload = None if selected_files is None else json.dumps(sorted(selected_files))
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE torrents_history SET file_selection = ? WHERE info_hash = ?",
+                (payload, info_hash.lower()),
+            )
+
+    def get_file_selection(self, info_hash: str) -> Optional[List[str]]:
+        """Returns the persisted file selection, or None when everything is selected."""
+        import json
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT file_selection FROM torrents_history WHERE info_hash = ?",
+                (info_hash.lower(),),
+            )
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                return None
+            try:
+                data = json.loads(row[0])
+                return list(data) if isinstance(data, list) else None
+            except Exception:
+                return None
 
     def get_resumable_torrents(self, limit: int = 500) -> List[Dict[str, Any]]:
         """Returns DB rows that should be present in Live Swarm (survive restarts).

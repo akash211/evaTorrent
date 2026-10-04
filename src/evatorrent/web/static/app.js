@@ -12,6 +12,9 @@ function escapeHtml(str) {
 
 let torrents = [];
 let selectedTorrentHash = null;
+let inspectorFiles = [];
+let inspectorFilesHash = null;
+let pendingFileSel = null; // {path: bool} unsaved checkbox edits (survives telemetry re-renders)
 let currentFilter = 'all';
 let searchQuery = '';
 let activeInspectorTab = 'overview';
@@ -357,6 +360,15 @@ function updateGlobalStats(stats) {
 }
 
 // Update Torrents & Render List
+async function loadTorrents() {
+  try {
+    const res = await fetch('/api/torrents');
+    if (res.ok) updateTorrents(await res.json());
+  } catch (e) {
+    console.error('Failed to load torrents:', e);
+  }
+}
+
 function updateTorrents(newTorrents) {
   torrents = newTorrents;
   updateCounts();
@@ -524,14 +536,138 @@ function openInspector(hash) {
 
   document.getElementById('inspector-overlay').classList.remove('hidden');
   document.getElementById('inspector-drawer').classList.remove('hidden');
+  inspectorFilesHash = null;
+  inspectorFiles = [];
+  pendingFileSel = null;
+  loadInspectorFiles(hash);
   refreshInspectorData(t);
   switchInspectorTab(activeInspectorTab);
 }
 
 function closeInspector() {
   selectedTorrentHash = null;
+  inspectorFiles = [];
+  inspectorFilesHash = null;
+  pendingFileSel = null;
   document.getElementById('inspector-overlay').classList.add('hidden');
   document.getElementById('inspector-drawer').classList.add('hidden');
+}
+
+// --- Per-file download selection ---
+
+async function loadInspectorFiles(hash) {
+  if (inspectorFilesHash === hash && inspectorFiles.length) {
+    const t = torrents.find(item => item.info_hash === hash);
+    if (t) renderInspectorFiles(t);
+    return;
+  }
+  try {
+    const res = await fetch(`/api/torrents/${hash}/files`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    inspectorFiles = data.files || [];
+    inspectorFilesHash = hash;
+    pendingFileSel = null;
+  } catch (e) {
+    inspectorFiles = [];
+    inspectorFilesHash = hash;
+  }
+  const t = torrents.find(item => item.info_hash === hash);
+  if (t && hash === selectedTorrentHash) renderInspectorFiles(t);
+}
+
+function isFileChecked(f) {
+  if (pendingFileSel && f.path in pendingFileSel) return pendingFileSel[f.path];
+  return f.selected !== false;
+}
+
+function renderInspectorFiles(t) {
+  const filesEl = document.getElementById('files-list');
+  const barEl = document.getElementById('files-toolbar');
+  if (!filesEl) return;
+  const list = (inspectorFilesHash === t.info_hash && inspectorFiles.length)
+    ? inspectorFiles
+    : (t.files || []);
+  if (!list.length) {
+    if (barEl) barEl.classList.add('hidden');
+    filesEl.innerHTML = `<li>${escapeHtml(t.name)} (${formatBytes(t.total_size)})</li>`;
+    return;
+  }
+  const checkedCount = list.filter(isFileChecked).length;
+  if (barEl) {
+    barEl.classList.remove('hidden');
+    const dirty = pendingFileSel !== null;
+    document.getElementById('files-sel-count').textContent = `${checkedCount}/${list.length} selected`;
+    document.getElementById('files-apply-bar').classList.toggle('hidden', !dirty);
+  }
+  filesEl.innerHTML = list.map((f, i) => `
+    <li class="file-row${isFileChecked(f) ? '' : ' file-deselected'}">
+      <input type="checkbox" id="file-check-${i}" ${isFileChecked(f) ? 'checked' : ''}
+        onchange="toggleFileSelected(${i})" title="Include in download" />
+      <label for="file-check-${i}" class="file-path">${escapeHtml(f.path)}</label>
+      <strong class="file-size">${formatBytes(f.length)}</strong>
+    </li>
+  `).join('');
+}
+
+function toggleFileSelected(i) {
+  const f = inspectorFiles[i];
+  if (!f) return;
+  const box = document.getElementById(`file-check-${i}`);
+  if (pendingFileSel === null) pendingFileSel = {};
+  pendingFileSel[f.path] = box ? box.checked : !isFileChecked(f);
+  const row = box ? box.closest('.file-row') : null;
+  if (row) row.classList.toggle('file-deselected', !pendingFileSel[f.path]);
+  const list = inspectorFiles.length ? inspectorFiles : [];
+  const checkedCount = list.filter(isFileChecked).length;
+  const cnt = document.getElementById('files-sel-count');
+  if (cnt) cnt.textContent = `${checkedCount}/${list.length} selected`;
+  const applyBar = document.getElementById('files-apply-bar');
+  if (applyBar) applyBar.classList.remove('hidden');
+}
+
+function setAllFilesChecked(checked) {
+  if (!inspectorFiles.length) return;
+  if (pendingFileSel === null) pendingFileSel = {};
+  inspectorFiles.forEach(f => { pendingFileSel[f.path] = checked; });
+  const t = torrents.find(item => item.info_hash === selectedTorrentHash);
+  if (t) renderInspectorFiles(t);
+}
+
+async function applyFileSelection() {
+  const hash = selectedTorrentHash;
+  if (!hash || !inspectorFiles.length) return;
+  const selected = inspectorFiles.filter(isFileChecked).map(f => f.path);
+  if (!selected.length) {
+    showToast('Keep at least one file selected', 'error');
+    return;
+  }
+  logUIEvent('live', 'file_selection_apply', `${selected.length}/${inspectorFiles.length} files`);
+  try {
+    showToast('Applying file selection…', 'info');
+    const res = await fetch(`/api/torrents/${hash}/files`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected_paths: selected }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success) {
+      pendingFileSel = null;
+      inspectorFiles.forEach(f => { f.selected = selected.includes(f.path); });
+      showToast(`Downloading ${data.selected_count}/${data.total_count} files (${data.skipped_pieces} pieces skipped)`, 'success');
+      loadTorrents();
+    } else {
+      showToast(data.detail || 'Failed to apply file selection', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to apply file selection: ' + err.message, 'error');
+  }
+}
+
+function resetFileSelection() {
+  pendingFileSel = null;
+  const t = torrents.find(item => item.info_hash === selectedTorrentHash);
+  if (t) renderInspectorFiles(t);
 }
 
 function refreshInspectorData(t) {
@@ -574,18 +710,9 @@ function refreshInspectorData(t) {
     trackersEl.innerHTML = `<li>No trackers announced</li>`;
   }
 
-  // Files list
-  const filesEl = document.getElementById('files-list');
-  if (t.files && t.files.length > 0) {
-    filesEl.innerHTML = t.files.map(f => `
-      <li>
-        <span>${f.path}</span>
-        <strong style="float: right;">${formatBytes(f.length)}</strong>
-      </li>
-    `).join('');
-  } else {
-    filesEl.innerHTML = `<li>${t.name} (${formatBytes(t.total_size)})</li>`;
-  }
+  // Files list (per-file download selection; full list cached separately —
+  // t.files may be truncated at 500 for telemetry, never Apply from it)
+  renderInspectorFiles(t);
 
   if (activeInspectorTab === 'pieces') {
     fetchPiecesMap(t.info_hash);
@@ -606,6 +733,7 @@ function switchInspectorTab(tabName) {
   if (selectedTorrentHash) {
     if (tabName === 'pieces') fetchPiecesMap(selectedTorrentHash);
     if (tabName === 'peers') fetchPeersList(selectedTorrentHash);
+    if (tabName === 'files') loadInspectorFiles(selectedTorrentHash);
   }
 }
 
