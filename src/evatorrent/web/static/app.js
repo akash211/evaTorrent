@@ -595,6 +595,16 @@ function renderInspectorFiles(t) {
   const filesEl = document.getElementById('files-list');
   const barEl = document.getElementById('files-toolbar');
   if (!filesEl) return;
+  // Never rebuild the list while the user is interacting with it: telemetry
+  // re-renders every tick and would destroy an open priority dropdown,
+  // silently swallowing the change. Just refresh the counts line instead.
+  const active = document.activeElement;
+  if (active && active.closest && active.closest('#tab-files')) {
+    const list = (inspectorFilesHash === t.info_hash && inspectorFiles.length) ? inspectorFiles : (t.files || []);
+    const cnt = document.getElementById('files-sel-count');
+    if (cnt && list.length) cnt.textContent = `${list.filter(isFileChecked).length}/${list.length} selected`;
+    return;
+  }
   const list = (inspectorFilesHash === t.info_hash && inspectorFiles.length)
     ? inspectorFiles
     : (t.files || []);
@@ -661,6 +671,7 @@ function toggleFileSelected(i) {
 
 function setAllFilesChecked(checked) {
   if (!inspectorFiles.length) return;
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   if (pendingFileSel === null) pendingFileSel = {};
   inspectorFiles.forEach(f => { pendingFileSel[f.path] = checked ? 1 : 0; });
   const t = torrents.find(item => item.info_hash === selectedTorrentHash);
@@ -669,6 +680,7 @@ function setAllFilesChecked(checked) {
 
 function setAllFilesHigh() {
   if (!inspectorFiles.length) return;
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   if (pendingFileSel === null) pendingFileSel = {};
   inspectorFiles.forEach(f => { pendingFileSel[f.path] = 2; });
   const t = torrents.find(item => item.info_hash === selectedTorrentHash);
@@ -697,6 +709,7 @@ async function applyFileSelection() {
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.success) {
       pendingFileSel = null;
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       inspectorFiles.forEach(f => {
         f.priority = prioMap[f.path];
         f.selected = prioMap[f.path] > 0;
@@ -714,6 +727,7 @@ async function applyFileSelection() {
 
 function resetFileSelection() {
   pendingFileSel = null;
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   const t = torrents.find(item => item.info_hash === selectedTorrentHash);
   if (t) renderInspectorFiles(t);
 }
@@ -725,10 +739,15 @@ function refreshInspectorData(t) {
   badge.textContent = t.status.toUpperCase();
   badge.className = `inspector-badge status-badge ${t.status}`;
 
-  document.getElementById('insp-size').textContent = (t.selected_bytes && t.selected_bytes < t.total_size)
-    ? `${formatBytes(t.selected_bytes)} selected of ${formatBytes(t.total_size)}`
-    : formatBytes(t.total_size);
-  document.getElementById('insp-downloaded').textContent = `${formatBytes(t.downloaded)} (${t.progress}%)`;
+  document.getElementById('insp-size').textContent = formatBytes(t.total_size);
+  const selBytes = (t.selected_bytes !== undefined && t.selected_bytes !== null) ? t.selected_bytes : t.total_size;
+  const selEl = document.getElementById('insp-selected');
+  if (selEl) {
+    selEl.textContent = (selBytes < t.total_size)
+      ? `${formatBytes(selBytes)} of ${formatBytes(t.total_size)}`
+      : `${formatBytes(t.total_size)} (all files)`;
+  }
+  document.getElementById('insp-downloaded').textContent = `${formatBytes(t.downloaded)} (${t.progress}% of selected)`;
   document.getElementById('insp-dl-speed').textContent = formatSpeed(t.download_speed);
   document.getElementById('insp-ul-speed').textContent = formatSpeed(t.upload_speed);
   document.getElementById('insp-eta').textContent = formatDuration(t.eta);

@@ -1,6 +1,8 @@
 import io
 import zipfile
 
+import pytest
+
 from evatorrent.subtitles.service import (
     clean_video_title,
     extract_subtitle_from_bytes,
@@ -20,6 +22,26 @@ def test_clean_video_title_series():
     q, year, season, episode = clean_video_title("Breaking.Bad.S01E02.720p.HDTV.x264.mkv")
     assert season == 1 and episode == 2
     assert "breaking bad" in q.lower()
+
+
+def test_clean_video_title_strips_uploader_suffix():
+    q, year, season, episode = clean_video_title(
+        "Perfume The Story of a Murderer 2006 1080p BluRay x264 AAC - Ozlem.mp4"
+    )
+    assert "ozlem" not in q.lower()
+    assert year == 2006
+    assert "perfume" in q.lower()
+
+
+def test_clean_video_title_keeps_episode_suffix():
+    q, year, season, episode = clean_video_title("Some.Show - S01E02.mkv")
+    assert season == 1 and episode == 2
+
+
+def test_clean_video_title_strips_brackets():
+    q, year, season, episode = clean_video_title("Just.Like.Heaven.2005.1080p[MAX.WEB-DL][TGx].mkv")
+    assert "tgx" not in q.lower()
+    assert year == 2005
 
 
 def test_scan_videos_lists_and_detects_subs(tmp_path):
@@ -79,3 +101,87 @@ def test_extract_non_subtitle_rejected():
         assert "timestamp" in str(e)
     else:
         raise AssertionError("non-subtitle must be rejected")
+
+
+@pytest.mark.asyncio
+async def test_yify_by_imdb_parses_live_structure():
+    from evatorrent.subtitles.providers import yify_by_imdb
+
+    movie_html = """
+    <html><body>
+    <a href="/subtitles/some-movie-2020-french-yify-111">French</a>
+    <a href="/subtitles/some-movie-2020-english-yify-222">English subtitle</a>
+    <a href="/subtitles/some-movie-2020-english-yify-333">English HI</a>
+    </body></html>
+    """
+    detail_html = '<html><body><a href="/subtitle/some-movie-2020-english-yify-222.zip">Download</a> 8.5/10</body></html>'
+
+    class FakeResp:
+        def __init__(self, text, status=200):
+            self.text = text
+            self.status_code = status
+
+    class FakeClient:
+        async def get(self, url):
+            if url.endswith("/movie-imdb/tt1234567"):
+                return FakeResp(movie_html)
+            if "/subtitles/" in url:
+                return FakeResp(detail_html)
+            return FakeResp("", status=404)
+
+    results = await yify_by_imdb(FakeClient(), "tt1234567", "Some Movie", limit=10)
+    assert len(results) == 2
+    assert all(r.provider == "yify" and r.language == "en" for r in results)
+    assert all(r.download_url.endswith(".zip") for r in results)
+    assert "french" not in " ".join(r.release for r in results).lower()
+
+
+@pytest.mark.asyncio
+async def test_yify_by_imdb_invalid_and_missing():
+    from evatorrent.subtitles.providers import yify_by_imdb
+
+    class FakeClient:
+        async def get(self, url):
+            class R:
+                status_code = 404
+                text = ""
+
+            return R()
+
+    assert await yify_by_imdb(FakeClient(), "not-an-id", "X") == []
+    assert await yify_by_imdb(FakeClient(), "tt1234567", "X") == []
+
+
+@pytest.mark.asyncio
+async def test_search_prefers_imdb_path(tmp_path, monkeypatch):
+    import evatorrent.subtitles.service as svc_mod
+    from evatorrent.subtitles.service import SubtitleService
+
+    async def fake_resolve(self, title, media_type, year):
+        assert media_type in ("movie", "tv")
+        return "tt1234567"
+
+    async def fake_yify(client, imdb_id, title, limit=20):
+        from evatorrent.subtitles.service import SubtitleResult
+
+        assert imdb_id == "tt1234567"
+        return [
+            SubtitleResult(
+                id="yify:x", title=title, language="en", release="R", rating=9.0,
+                downloads=0, provider="yify", download_url="https://x/1.zip",
+            )
+        ]
+
+    async def boom(client, q, limit=20):
+        raise AssertionError("legacy providers must not run when imdb path fills results")
+
+    monkeypatch.setattr(svc_mod.SubtitleService, "_resolve_imdb", fake_resolve)
+    monkeypatch.setattr("evatorrent.subtitles.providers.yify_by_imdb", fake_yify)
+    monkeypatch.setattr("evatorrent.subtitles.providers.search_yify", boom)
+    monkeypatch.setattr("evatorrent.subtitles.providers.search_opensubtitles_org", boom)
+
+    svc = SubtitleService(download_dir=tmp_path)
+    out = await svc.search("Some Movie", limit=1, media_type="movie", year=2020)
+    assert len(out["results"]) == 1
+    assert out["imdb_id"] == "tt1234567"
+    assert "yify_imdb" in out["providers_queried"]

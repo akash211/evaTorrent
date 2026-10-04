@@ -121,6 +121,9 @@ async def test_files_selection_api(tmp_path):
         body = resp.json()
         assert len(body["files"]) == 2
         assert all(f["selected"] for f in body["files"])
+        assert all(f["priority"] == 1 for f in body["files"])
+        assert all("progress" in f and "done_bytes" in f for f in body["files"])
+        assert body["selected_bytes"] == body["total_bytes"]
 
         # Deselect b.mkv.
         resp = await client.post(f"/api/torrents/{info_hash}/files", json={"selected_paths": ["pack/b.mkv"]})
@@ -144,6 +147,24 @@ async def test_files_selection_api(tmp_path):
         )
         assert resp.status_code == 200
         assert resp.json()["skipped_pieces"] == 0
+
+        # Priority map: b.mkv high, a.mkv normal.
+        resp = await client.post(
+            f"/api/torrents/{info_hash}/files",
+            json={"priorities": {"pack/a.mkv": 1, "pack/b.mkv": 2}},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["high_priority_count"] == 1
+        resp = await client.get(f"/api/torrents/{info_hash}/files")
+        files = {f["path"]: f for f in resp.json()["files"]}
+        assert files["pack/b.mkv"]["priority"] == 2
+        assert files["pack/a.mkv"]["priority"] == 1
+        # Invalid priority rejected.
+        resp = await client.post(
+            f"/api/torrents/{info_hash}/files", json={"priorities": {"pack/a.mkv": 9}}
+        )
+        assert resp.status_code == 400
 
         resp = await client.delete(f"/api/torrents/{info_hash}")
         assert resp.status_code == 200

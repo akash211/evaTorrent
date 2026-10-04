@@ -65,27 +65,36 @@ class SubtitleResult:
 
 def clean_video_title(filename: str) -> tuple[str, Optional[int], Optional[int], Optional[int]]:
     """Returns (query, year, season, episode) derived from a video filename."""
-    stem = Path(filename).stem
+    raw = Path(filename).stem
     season = episode = None
-    m = _SEASON_EP.search(stem)
+    m = _SEASON_EP.search(raw)
     if m:
         try:
             season, episode = int(m.group(1)), int(m.group(2))
         except ValueError:
             pass
     year = None
-    ym = _YEAR.search(stem)
+    ym = _YEAR.search(raw)
     if ym:
         try:
             year = int(ym.group(1))
         except ValueError:
             pass
+    # Strip container/flat extras only AFTER markers are extracted:
+    # [TGx], {www...}, and trailing "- Uploader" scene suffixes (but never
+    # a trailing S01E01 marker or year, which carry meaning).
+    stem = re.sub(r"\[[^\]]*\]|\{[^}]*\}", " ", raw)
+    m_tail = re.search(r"\s+[-–—]\s*([A-Za-z0-9_.]+)\s*$", stem)
+    if m_tail:
+        tok = m_tail.group(1)
+        if not _SEASON_EP.fullmatch(tok) and not _YEAR.fullmatch(tok):
+            stem = stem[: m_tail.start()].strip()
     text = re.sub(r"[._\-+]+", " ", stem)
     text = _SEASON_EP.sub(" ", text)
     text = _YEAR.sub(" ", text)
     text = _RELEASE_TAGS.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip(" -_().[]")
-    return (text or stem), year, season, episode
+    return (text or raw), year, season, episode
 
 
 def scan_videos(download_dir: Path, limit: int = 500) -> List[VideoEntry]:
@@ -196,29 +205,69 @@ class SubtitleService:
     def videos(self, limit: int = 500) -> List[dict]:
         return [vars(v) for v in scan_videos(self.download_dir, limit=limit)]
 
-    async def search(self, query: str, limit: int = 20) -> dict:
-        """Searches English subtitles across providers (keyless first)."""
-        from evatorrent.subtitles.providers import search_opensubtitles_org, search_yify
+    async def _resolve_imdb(self, title: str, media_type: str, year: Optional[int]) -> Optional[str]:
+        """Resolves an IMDb ID via the Discover metadata stack (OMDb/TMDb keys or keyless)."""
+        try:
+            from evatorrent.metadata import lookup_media
+
+            data = await lookup_media(query=title, media_type=media_type, limit=5, timeout=12.0, year=year)
+            results = data.get("results") if isinstance(data, dict) else None
+            if not isinstance(results, list):
+                return None
+            for item in results:
+                if isinstance(item, dict) and item.get("imdb_id"):
+                    imdb = str(item["imdb_id"]).strip().lower()
+                    if imdb.startswith("tt"):
+                        logger.info(f"[SUBTITLES] Resolved IMDb {imdb} for '{title}' via Discover metadata")
+                        return imdb
+        except Exception as e:
+            logger.debug(f"[SUBTITLES] IMDb resolution failed for '{title}': {e}")
+        return None
+
+    async def search(
+        self,
+        query: str,
+        limit: int = 20,
+        media_type: str = "movie",
+        year: Optional[int] = None,
+    ) -> dict:
+        """Searches English subtitles: IMDb-resolved Yify first, legacy providers after."""
+        from evatorrent.subtitles.providers import (
+            search_opensubtitles_org,
+            search_yify,
+            yify_by_imdb,
+        )
 
         q = query.strip()
         if not q:
             raise ValueError("Search query is required.")
         results: List[SubtitleResult] = []
         errors: List[str] = []
+        imdb_id = await self._resolve_imdb(q, media_type, year)
         async with httpx.AsyncClient(
             timeout=self.timeout,
             follow_redirects=True,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) evaTorrent/0.9"},
         ) as client:
-            for provider_fn in (search_yify, search_opensubtitles_org):
+            if imdb_id:
                 try:
-                    found = await provider_fn(client, q, limit=limit)
+                    found = await yify_by_imdb(client, imdb_id, q, limit=limit)
                     results.extend(found)
                 except Exception as e:
-                    errors.append(f"{provider_fn.__name__}: {e}")
-                    logger.debug("Subtitle provider %s failed: %s", provider_fn.__name__, e)
-                if len(results) >= limit:
-                    break
+                    errors.append(f"yify_by_imdb: {e}")
+                    logger.debug("Subtitle provider yify_by_imdb failed: %s", e)
+            if len(results) < limit:
+                # Legacy fallbacks (Yify text search is currently 500 upstream;
+                # opensubtitles.org walls some networks — both best-effort).
+                for provider_fn in (search_yify, search_opensubtitles_org):
+                    try:
+                        found = await provider_fn(client, q, limit=limit)
+                        results.extend(found)
+                    except Exception as e:
+                        errors.append(f"{provider_fn.__name__}: {e}")
+                        logger.debug("Subtitle provider %s failed: %s", provider_fn.__name__, e)
+                    if len(results) >= limit:
+                        break
         # Optional keyed provider last (higher quality when configured).
         if os.environ.get("OPENSUBTITLES_API_KEY"):
             try:
@@ -246,8 +295,9 @@ class SubtitleService:
             "query": q,
             "language": "en",
             "results": [vars(r) for r in ranked],
-            "providers_queried": ["yify", "opensubtitles_org"]
+            "providers_queried": ["yify_imdb", "yify", "opensubtitles_org"]
             + (["opensubtitles_com"] if os.environ.get("OPENSUBTITLES_API_KEY") else []),
+            "imdb_id": imdb_id,
             "errors": errors,
         }
 

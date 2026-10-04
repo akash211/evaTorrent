@@ -1199,6 +1199,8 @@ async def search_subtitles(
 
     query = (q or "").strip()
     meta: dict = {}
+    media_type = "movie"
+    year = None
     if video:
         from pathlib import Path as _P
 
@@ -1208,15 +1210,13 @@ async def search_subtitles(
             query = title
             meta.update({"derived_title": title, "year": year, "season": season, "episode": episode})
             if season and episode:
-                query = f"{title} S{season:02d}E{episode:02d}"
-            elif year:
-                query = f"{title} {year}"
+                media_type = "tv"
     if not query:
         logger.warning(f"[SUBTITLES] User '{user}' search rejected: no q= or video= given")
         raise HTTPException(status_code=400, detail="Provide q= or video= so a title can be derived.")
     logger.info(f"[SUBTITLES] User '{user}' searching English subs: q='{query}' video='{video or ''}' override='{q or ''}'")
     try:
-        result = await _subtitle_service().search(query, limit=limit)
+        result = await _subtitle_service().search(query, limit=limit, media_type=media_type, year=year)
     except ValueError as e:
         logger.warning(f"[SUBTITLES] User '{user}' search failed for '{query}': {e}")
         raise HTTPException(status_code=400, detail=str(e))

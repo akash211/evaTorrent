@@ -34,6 +34,67 @@ def _abs(base: str, href: str) -> str:
     return urllib.parse.urljoin(base + "/", href)
 
 
+async def yify_by_imdb(
+    client: httpx.AsyncClient, imdb_id: str, title: str, limit: int = 20
+) -> List[SubtitleResult]:
+    """English subtitles via a YifySubtitles movie page (no search page needed).
+
+    Flow: /movie-imdb/ttXXXX -> /subtitles/<slug>-english-... detail links ->
+    /subtitle/<slug>.zip download. Verified live against yifysubtitles.ch.
+    """
+    imdb = imdb_id.strip().lower()
+    if not imdb.startswith("tt"):
+        return []
+    results: List[SubtitleResult] = []
+    for base in _YIFY_BASES:
+        try:
+            page = await client.get(f"{base}/movie-imdb/{imdb}")
+        except Exception as e:
+            logger.debug("yify movie page fetch failed for %s: %s", imdb, e)
+            continue
+        if page.status_code != 200 or not page.text:
+            continue
+        # Detail links carry the language in the slug: /subtitles/<movie>-english-<id>
+        detail_paths: list[str] = []
+        for m in re.finditer(r'href="(/subtitles/[a-z0-9\-]+-english-[a-z0-9\-]+)"', page.text, re.IGNORECASE):
+            if m.group(1) not in detail_paths:
+                detail_paths.append(m.group(1))
+        for href in detail_paths[:limit]:
+            detail_url = _abs(base, href)
+            try:
+                detail = await client.get(detail_url)
+            except Exception as e:
+                logger.debug("yify detail page %s failed: %s", href, e)
+                continue
+            if detail.status_code != 200 or not detail.text:
+                continue
+            zm = re.search(r'href="(/subtitle/[^"]+\.zip)"', detail.text, re.IGNORECASE)
+            if not zm:
+                continue
+            dl = _abs(base, zm.group(1))
+            slug = href.strip("/").split("/")[-1]
+            release = re.sub(r"[-_]+", " ", slug).strip()
+            rating_m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*10", detail.text)
+            results.append(
+                SubtitleResult(
+                    id=f"yify:{urllib.parse.quote(dl)}",
+                    title=title,
+                    language="en",
+                    release=release[:120],
+                    rating=float(rating_m.group(1)) if rating_m else 0.0,
+                    downloads=0,
+                    provider="yify",
+                    download_url=dl,
+                    detail_url=detail_url,
+                )
+            )
+            if len(results) >= limit:
+                return results
+        if results:
+            return results
+    return results
+
+
 async def search_yify(client: httpx.AsyncClient, query: str, limit: int = 20) -> List[SubtitleResult]:
     """Searches YifySubtitles mirrors for English movie subtitles."""
     q = urllib.parse.quote_plus(query)
