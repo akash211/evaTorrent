@@ -52,7 +52,31 @@ class EngineManager:
             return self.sessions[info_hash_hex]
 
         dest_dir = output_dir or self.download_dir
+        try:
+            from evatorrent.engine.limits import LARGE_TORRENT_BYTES, effective_peer_settings
+
+            if torrent.total_length >= LARGE_TORRENT_BYTES:
+                _peers, _pipe = effective_peer_settings(torrent.total_length)
+                logger.warning(
+                    "[ENGINE] Large torrent '%s' (%.1f GB): auto-tuned to max_peers=%d pipeline=%d "
+                    "to protect small hosts. Override with EVA_MAX_PEERS/EVA_PIPELINE_PER_PEER.",
+                    torrent.name,
+                    torrent.total_length / (1024**3),
+                    _peers,
+                    _pipe,
+                )
+        except Exception:
+            pass
         session = TorrentSession(torrent=torrent, download_dir=dest_dir, db=self.db)
+        logger.info(
+            "[ENGINE] Added '%s' (%.2f GB, %d pieces, %d trackers, max_peers=%d) -> %s",
+            torrent.name,
+            torrent.total_length / (1024**3),
+            torrent.piece_count,
+            len(torrent.trackers),
+            session.max_peers,
+            dest_dir,
+        )
         self.sessions[info_hash_hex] = session
 
         # Always persist raw metainfo so a container recreate can rebuild this session.

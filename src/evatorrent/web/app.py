@@ -114,6 +114,21 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "testserver"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from evatorrent.engine import limits as _limits
+
+    logger.info(
+        "[STARTUP] evaTorrent v%s | download_dir=%s | limits: max_peers=%d pipeline=%d ongoing=%d "
+        "stream_buf=%dB telemetry=%.1fs verify=%s large_at=%dGB",
+        __version__,
+        engine_manager.download_dir,
+        _limits.MAX_PEERS,
+        _limits.PIPELINE_PER_PEER,
+        _limits.MAX_ONGOING_PIECES,
+        _limits.STREAM_BUFFER_LIMIT,
+        _limits.TELEMETRY_INTERVAL_SECS,
+        _limits.VERIFY_ON_STARTUP,
+        _limits.LARGE_TORRENT_BYTES // (1024**3),
+    )
     try:
         summary = await engine_manager.restore_from_db()
         logger.info(f"[STARTUP] Swarm auto-resume from DB: {summary}")
@@ -126,10 +141,15 @@ async def lifespan(app: FastAPI):
 
 
 async def telemetry_loop():
-    """Streams live telemetry to all connected authenticated WebSocket clients every 800ms."""
+    """Streams live telemetry to all connected authenticated WebSocket clients."""
+    try:
+        interval = float(os.environ.get("EVA_TELEMETRY_SECS", 0.8))
+    except (ValueError, TypeError):
+        interval = 0.8
+    interval = min(max(interval, 0.5), 10.0)
     while True:
         try:
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(interval)
             if ws_manager.active_connections:
                 payload = {
                     "type": "telemetry",
@@ -170,6 +190,7 @@ async def no_cache_static_middleware(request: Request, call_next):
         "/home",
         "/search",
         "/discover",
+        "/subtitle",
         "/report",
     ):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -281,6 +302,7 @@ async def initial_setup(req: SetupRequest, request: Request, response: Response)
     auth_config.set_admin_email(email)
     if req.google_client_id:
         auth_config.set_google_client_id(req.google_client_id)
+    logger.info(f"[AUTH] Initial setup completed for admin '{email}' (google_configured={bool(req.google_client_id)})")
 
     token = session_manager.create_token(email)
     response.set_cookie(
@@ -329,7 +351,10 @@ async def verify_otp(req: OTPVerifyRequest, request: Request, response: Response
         raise HTTPException(status_code=403, detail="Email is not authorized.")
 
     if not otp_manager.verify_otp(email, req.otp):
+        logger.warning(f"[AUTH] OTP verification failed for '{email}' (wrong or expired code)")
         raise HTTPException(status_code=400, detail="Invalid or expired verification code.")
+
+    logger.info(f"[AUTH] OTP login success for '{email}'")
 
     token = session_manager.create_token(email)
     response.set_cookie(
@@ -351,10 +376,12 @@ async def google_login(req: GoogleAuthRequest, request: Request, response: Respo
 
     verified_email = await google_verifier.verify_id_token(req.credential)
     if not verified_email:
+        logger.warning("[AUTH] Google sign-in failed: token invalid or email unauthorized")
         raise HTTPException(
             status_code=403,
             detail="Google sign-in failed: Account email is not authorized for this instance.",
         )
+    logger.info(f"[AUTH] Google login success for '{verified_email}'")
 
     token = session_manager.create_token(verified_email)
     response.set_cookie(
@@ -465,6 +492,7 @@ class SpeedLimitRequest(BaseModel):
 @app.api_route("/home", methods=["GET", "HEAD"])
 @app.api_route("/search", methods=["GET", "HEAD"])
 @app.api_route("/discover", methods=["GET", "HEAD"])
+@app.api_route("/subtitle", methods=["GET", "HEAD"])
 @app.api_route("/report", methods=["GET", "HEAD"])
 async def serve_index():
     index_file = STATIC_DIR / "index.html"
@@ -487,13 +515,25 @@ async def list_torrents(_: str = Depends(get_current_user)):
 @app.post("/api/torrents/upload")
 async def upload_torrent(
     file: UploadFile = File(...),
-    _: str = Depends(get_current_user),
+    user: str = Depends(get_current_user),
 ):
     try:
         content = await file.read(MAX_TORRENT_UPLOAD_BYTES + 1)
         if len(content) > MAX_TORRENT_UPLOAD_BYTES:
+            logger.warning(f"[TORRENT] User '{user}' upload rejected: '{file.filename}' exceeds 10 MB")
             raise HTTPException(status_code=413, detail="Torrent file exceeds 10 MB size limit.")
         session = engine_manager.add_torrent_bytes(content)
+        t = session.torrent
+        logger.info(
+            "[TORRENT] User '%s' uploaded '%s' (%s, %.2f GB, %d pieces, %d trackers, max_peers=%d)",
+            user,
+            file.filename,
+            t.info_hash_hex[:8],
+            t.total_length / (1024**3),
+            t.piece_count,
+            len(t.trackers),
+            session.max_peers,
+        )
         return {"success": True, "info_hash": session.torrent.info_hash_hex, "name": session.torrent.name}
     except HTTPException:
         raise
@@ -511,8 +551,16 @@ async def add_magnet(
     logger.info(f"[API] User '{user}' requested adding torrent: {req.magnet[:70]}...")
     try:
         session = await engine_manager.add_torrent_or_url(req.magnet)
+        t = session.torrent
         logger.info(
-            f"[API SUCCESS] Enrolled torrent '{session.torrent.name}' ({session.torrent.info_hash_hex[:8]}) for user '{user}'"
+            "[API SUCCESS] User '%s' enrolled '%s' (%s, %.2f GB, %d pieces, %d trackers, max_peers=%d)",
+            user,
+            t.name,
+            t.info_hash_hex[:8],
+            t.total_length / (1024**3),
+            t.piece_count,
+            len(t.trackers),
+            session.max_peers,
         )
         return {
             "success": True,
@@ -602,8 +650,10 @@ async def download_torrent_file(
 @app.post("/api/torrents/{info_hash}/pause")
 async def pause_torrent(
     info_hash: str,
-    _: str = Depends(get_current_user),
+    user: str = Depends(get_current_user),
 ):
+    session = engine_manager.get_session(info_hash)
+    name = session.torrent.name if session else (database.get_torrent_history(info_hash) or {}).get("name", info_hash[:12])
     success = await engine_manager.pause_torrent(info_hash)
     if not success:
         # DB-only row (e.g. after restart before rebuild): mark paused in DB.
@@ -615,15 +665,18 @@ async def pause_torrent(
                 int(row.get("uploaded_bytes") or 0),
                 "paused",
             )
+            logger.info(f"[TORRENT] User '{user}' paused '{name}' ({info_hash[:8]}, source=db)")
             return {"success": True, "source": "db"}
+        logger.warning(f"[TORRENT] User '{user}' pause failed: torrent {info_hash[:8]} not found")
         raise HTTPException(status_code=404, detail="Torrent not found")
+    logger.info(f"[TORRENT] User '{user}' paused '{name}' ({info_hash[:8]})")
     return {"success": True}
 
 
 @app.post("/api/torrents/{info_hash}/resume")
 async def resume_torrent(
     info_hash: str,
-    _: str = Depends(get_current_user),
+    user: str = Depends(get_current_user),
 ):
     success = engine_manager.resume_torrent(info_hash)
     if not success:
@@ -631,13 +684,19 @@ async def resume_torrent(
         try:
             rebuilt = await engine_manager.resume_db_torrent(info_hash)
         except Exception as e:
+            logger.error(f"[TORRENT] User '{user}' resume failed for {info_hash[:8]}: {e}", exc_info=True)
             raise HTTPException(status_code=400, detail=f"Resume failed: {e}")
         if not rebuilt:
+            logger.warning(f"[TORRENT] User '{user}' resume failed: {info_hash[:8]} not in swarm or database")
             raise HTTPException(
                 status_code=404,
                 detail="Torrent not found in live swarm or database. Re-add the .torrent/magnet.",
             )
+        logger.info(f"[TORRENT] User '{user}' resumed {info_hash[:8]} (session rebuilt from database)")
         return {"success": True, "source": "db", "message": "Session rebuilt from database and resumed."}
+    session = engine_manager.get_session(info_hash)
+    name = session.torrent.name if session else info_hash[:12]
+    logger.info(f"[TORRENT] User '{user}' resumed '{name}' ({info_hash[:8]})")
     return {"success": True}
 
 
@@ -645,11 +704,13 @@ async def resume_torrent(
 async def set_torrent_speed_limit(
     info_hash: str,
     req: SpeedLimitRequest,
-    _: str = Depends(get_current_user),
+    user: str = Depends(get_current_user),
 ):
     success = engine_manager.set_speed_limit(info_hash, req.download_limit)
     if not success:
+        logger.warning(f"[TORRENT] User '{user}' speed-limit failed: {info_hash[:8]} not found")
         raise HTTPException(status_code=404, detail="Torrent not found")
+    logger.info(f"[TORRENT] User '{user}' set download_limit={req.download_limit} B/s on {info_hash[:8]}")
     return {"success": True, "download_limit": req.download_limit}
 
 
@@ -657,26 +718,41 @@ async def set_torrent_speed_limit(
 async def delete_torrent(
     info_hash: str,
     delete_files: bool = False,
-    _: str = Depends(get_current_user),
+    user: str = Depends(get_current_user),
 ):
+    session = engine_manager.get_session(info_hash)
+    name = session.torrent.name if session else (database.get_torrent_history(info_hash) or {}).get("name", info_hash[:12])
     success = await engine_manager.remove_torrent(info_hash, delete_files=delete_files)
     if not success:
+        logger.warning(f"[TORRENT] User '{user}' delete failed: {info_hash[:8]} not found")
         raise HTTPException(status_code=404, detail="Torrent not found")
+    logger.info(f"[TORRENT] User '{user}' removed '{name}' ({info_hash[:8]}, delete_files={delete_files})")
     return {"success": True}
 
 
 @app.get("/api/torrents/{info_hash}/pieces")
 async def get_torrent_pieces(
     info_hash: str,
+    limit: int = Query(5000, ge=1, le=100000, description="Max piece indices returned"),
+    offset: int = Query(0, ge=0, description="Offset into sorted completed indices"),
     _: str = Depends(get_current_user),
 ):
     session = engine_manager.get_session(info_hash)
     if not session:
         raise HTTPException(status_code=404, detail="Torrent not found")
+    completed = sorted(session.piece_manager.completed_pieces)
+    total = len(completed)
+    # Paginate: a 155 GB torrent has ~40-150k pieces; serializing all of them
+    # every poll kept CPUs hot and payloads huge.
+    page = completed[offset : offset + limit]
     return {
         "total_pieces": session.torrent.piece_count,
-        "completed_indices": sorted(list(session.piece_manager.completed_pieces)),
-        "ongoing_indices": sorted(list(session.piece_manager.ongoing_pieces)),
+        "completed_total": total,
+        "completed_indices": page,
+        "offset": offset,
+        "limit": limit,
+        "truncated": offset + len(page) < total,
+        "ongoing_indices": sorted(list(session.piece_manager.ongoing_pieces))[:limit],
     }
 
 
@@ -756,12 +832,23 @@ async def search_torrents(
             english=english,
         )
         elapsed = round(time.time() - t0, 2)
+        returned = results.get("returned", len(results.get("results", [])))
         logger.info(
-            f"[SEARCH API] Returned {results.get('returned', 0)} results for '{q}' in {elapsed}s (cached={results.get('is_cached')})"
+            "[SEARCH] User '%s' q='%s' cat=%s hindi=%s english=%s refresh=%s -> returned=%d/%d total (cached=%s) in %.2fs",
+            user,
+            q,
+            category,
+            hindi,
+            english,
+            refresh,
+            returned,
+            results.get("total_found", returned),
+            results.get("is_cached"),
+            elapsed,
         )
         return results
     except Exception as e:
-        logger.error(f"[SEARCH API ERROR] Search failed for '{q}': {e}")
+        logger.error(f"[SEARCH API ERROR] Search failed for '{q}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Search failed: {e}")
 
 
@@ -801,6 +888,17 @@ async def discover_media(
                 return cached
         data = await lookup_media(query=q, media_type=type, limit=limit, timeout=timeout, year=year)
         data["elapsed_seconds"] = round(time.time() - t0, 2)
+        n_results = len(data.get("results", [])) if isinstance(data.get("results"), list) else 0
+        logger.info(
+            "[DISCOVER] q='%s' type=%s year=%s refresh=%s -> %d results in %.2fs (keys=%s)",
+            q,
+            type,
+            year,
+            refresh,
+            n_results,
+            data["elapsed_seconds"],
+            data.get("keys_configured", "?"),
+        )
         data["ott_accuracy_note"] = (
             "India OTT data is approximate (JustWatch search) unless TMDB_API_KEY is configured, "
             "in which case live TMDB India providers are returned."
@@ -808,7 +906,7 @@ async def discover_media(
         discover_cache_manager.set(q, type, year, data)
         return data
     except Exception as e:
-        logger.error(f"[DISCOVER ERROR] lookup failed for '{q}': {e}")
+        logger.error(f"[DISCOVER ERROR] lookup failed for '{q}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Discover lookup failed: {e}")
 
 
@@ -838,28 +936,34 @@ async def list_saved_discover(
 
 
 @app.post("/api/discover/saved")
-async def save_discover_item(req: DiscoverSaveRequest, _: str = Depends(get_current_user)):
+async def save_discover_item(req: DiscoverSaveRequest, user: str = Depends(get_current_user)):
     """Saves a Discover result card into the personal library."""
     if not req.item or not req.item.get("title"):
+        logger.warning(f"[DISCOVER] User '{user}' save rejected: result item has no title")
         raise HTTPException(status_code=400, detail="A result item with a title is required.")
     saved = database.save_discover_item(req.item, req.remarks or "")
+    logger.info(f"[DISCOVER] User '{user}' saved '{req.item.get('title')}' (id={saved.get('id')}) to library")
     return {"success": True, "saved": saved}
 
 
 @app.put("/api/discover/saved/{saved_id}")
-async def update_saved_remarks(saved_id: int, req: DiscoverRemarksRequest, _: str = Depends(get_current_user)):
+async def update_saved_remarks(saved_id: int, req: DiscoverRemarksRequest, user: str = Depends(get_current_user)):
     """Updates the editable remarks on a saved library entry."""
     updated = database.update_discover_remarks(saved_id, req.remarks or "")
     if not updated:
+        logger.warning(f"[DISCOVER] User '{user}' remarks update failed: saved id={saved_id} not found")
         raise HTTPException(status_code=404, detail="Saved entry not found")
+    logger.info(f"[DISCOVER] User '{user}' updated remarks on saved id={saved_id} ('{updated.get('title', '')}')")
     return {"success": True, "saved": updated}
 
 
 @app.delete("/api/discover/saved/{saved_id}")
-async def delete_saved_discover(saved_id: int, _: str = Depends(get_current_user)):
+async def delete_saved_discover(saved_id: int, user: str = Depends(get_current_user)):
     """Removes an entry from the personal Discover library."""
     if not database.delete_saved_discover(saved_id):
+        logger.warning(f"[DISCOVER] User '{user}' delete failed: saved id={saved_id} not found")
         raise HTTPException(status_code=404, detail="Saved entry not found")
+    logger.info(f"[DISCOVER] User '{user}' removed saved id={saved_id} from library")
     return {"success": True}
 
 
@@ -867,6 +971,131 @@ async def delete_saved_discover(saved_id: int, _: str = Depends(get_current_user
 async def get_recent_searches(_: str = Depends(get_current_user)):
     """Returns up to 10 recent searches from the persistent search cache."""
     return {"recent_searches": search_cache_manager.get_recent(limit=10)}
+
+
+# --- Subtitles (movies / series in Downloads, English only) ---
+
+
+def _subtitle_service():
+    from evatorrent.subtitles.service import SubtitleService
+
+    return SubtitleService(download_dir=engine_manager.download_dir)
+
+
+@app.get("/api/subtitles/videos")
+async def list_subtitle_videos(
+    limit: int = Query(500, ge=1, le=2000),
+    _: str = Depends(get_current_user),
+):
+    """Dropdown source: all video files under DOWNLOAD_DIR with subtitle presence."""
+    svc = _subtitle_service()
+    return {"videos": svc.videos(limit=limit), "download_dir": str(engine_manager.download_dir)}
+
+
+@app.get("/api/subtitles/search")
+async def search_subtitles(
+    q: Optional[str] = Query(None, description="Title query (optional when video= is given)"),
+    video: Optional[str] = Query(None, description="Relative video path in Downloads; title auto-derived"),
+    limit: int = Query(20, ge=1, le=50),
+    user: str = Depends(get_current_user),
+):
+    """Searches English subtitles. Pass video=<relpath> to auto-derive the title."""
+    from evatorrent.subtitles.service import clean_video_title
+
+    query = (q or "").strip()
+    meta: dict = {}
+    if video:
+        from pathlib import Path as _P
+
+        meta = {"video": video, "video_name": _P(video).name}
+        if not query:
+            title, year, season, episode = clean_video_title(_P(video).name)
+            query = title
+            meta.update({"derived_title": title, "year": year, "season": season, "episode": episode})
+            if season and episode:
+                query = f"{title} S{season:02d}E{episode:02d}"
+            elif year:
+                query = f"{title} {year}"
+    if not query:
+        logger.warning(f"[SUBTITLES] User '{user}' search rejected: no q= or video= given")
+        raise HTTPException(status_code=400, detail="Provide q= or video= so a title can be derived.")
+    logger.info(f"[SUBTITLES] User '{user}' searching English subs: q='{query}' video='{video or ''}' override='{q or ''}'")
+    try:
+        result = await _subtitle_service().search(query, limit=limit)
+    except ValueError as e:
+        logger.warning(f"[SUBTITLES] User '{user}' search failed for '{query}': {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[SUBTITLES] User '{user}' search errored for '{query}': {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Subtitle search failed: {e}")
+    n = len(result.get("results", []))
+    logger.info(
+        "[SUBTITLES] User '%s' search q='%s' -> %d results via %s%s",
+        user,
+        query,
+        n,
+        ",".join(result.get("providers_queried", [])),
+        f" (provider errors: {result.get('errors')})" if result.get("errors") else "",
+    )
+    result["meta"] = meta
+    return result
+
+
+class SubtitleDownloadRequest(BaseModel):
+    video: str
+    download_url: str
+    provider: Optional[str] = ""
+
+
+@app.post("/api/subtitles/download")
+async def download_subtitle(req: SubtitleDownloadRequest, user: str = Depends(get_current_user)):
+    """Downloads an English subtitle, extracts it server-side (never serves zip),
+    validates it, and saves it next to the video with a matching filename."""
+    if not req.video or not req.download_url:
+        logger.warning(f"[SUBTITLES] User '{user}' download rejected: video/download_url missing")
+        raise HTTPException(status_code=400, detail="video and download_url are required.")
+    logger.info(
+        f"[SUBTITLES] User '{user}' downloading sub for '{req.video}' via {req.provider or 'unknown'}: {req.download_url[:120]}"
+    )
+    try:
+        result = await _subtitle_service().download_for_video(req.video, req.download_url, req.provider or "")
+    except ValueError as e:
+        logger.warning(f"[SUBTITLES] User '{user}' download for '{req.video}' rejected: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[SUBTITLES] User '{user}' download failed for '{req.video}': {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Subtitle download failed: {e}")
+    logger.info(
+        "[SUBTITLES] User '%s' saved '%s' (%d bytes, .%s) for video '%s'",
+        user,
+        result["saved_as"],
+        result["size_bytes"],
+        result["format"],
+        req.video,
+    )
+    return result
+
+
+class UIEventRequest(BaseModel):
+    tab: str
+    action: Optional[str] = ""
+    detail: Optional[str] = ""
+
+
+@app.post("/api/ui/event")
+async def ui_event(req: UIEventRequest, user: str = Depends(get_current_user)):
+    """Client-side breadcrumb beacon: tab switches, button clicks, modal opens.
+
+    Lets docker logs show what the user was doing (e.g. which tab was open)
+    when something went wrong — previously invisible because it never hit the API.
+    """
+    tab = (req.tab or "").strip()[:32]
+    action = (req.action or "").strip()[:64]
+    detail = (req.detail or "").strip()[:200]
+    if not tab:
+        raise HTTPException(status_code=400, detail="tab is required.")
+    logger.info(f"[UI] user='{user}' tab='{tab}' action='{action}' detail='{detail}'")
+    return {"success": True}
 
 
 # Mount static files

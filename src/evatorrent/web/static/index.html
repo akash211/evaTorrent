@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="/static/style.css?v=0.8.0" />
+  <link rel="stylesheet" href="/static/style.css?v=0.9.0" />
 </head>
 <body>
   <div class="app-container">
@@ -27,7 +27,7 @@
         </div>
         <div class="brand-text">
           <h1>evaTorrent</h1>
-          <span class="version-tag">v0.8.0 • Asyncio Core</span>
+          <span class="version-tag">v0.9.0 • Asyncio Core</span>
         </div>
       </div>
 
@@ -60,6 +60,10 @@
         <button id="nav-btn-discover" class="view-tab-btn" onclick="switchMainView('discover')">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
           Discover ✨
+        </button>
+        <button id="nav-btn-subtitles" class="view-tab-btn" onclick="switchMainView('subtitles')">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="15" x2="18" y2="15"/><line x1="9" y1="19" x2="15" y2="19"/></svg>
+          Subtitles 💬
         </button>
         <button id="nav-btn-analytics" class="view-tab-btn" onclick="switchMainView('analytics')">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
@@ -434,6 +438,62 @@
         </div>
       </div>
 
+      <!-- Subtitles View Pane: English subs for downloaded movies / series -->
+      <div id="view-pane-subtitles" class="view-pane hidden">
+        <div class="search-hero">
+          <div class="search-hero-content">
+            <h2>Subtitles 💬 — English subs for your Downloads</h2>
+            <p>Pick a movie or episode from Downloads, search English subtitles, and save the <code>.srt</code> next to the video with a matching filename — no zips, no renaming.</p>
+          </div>
+        </div>
+
+        <div class="search-controls-card">
+          <div class="search-input-wrapper">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" class="search-icon"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="15" x2="18" y2="15"/></svg>
+            <select id="subtitle-video-select" class="select-control" style="flex:1" onchange="handleSubtitleVideoChange()">
+              <option value="">Select a movie / episode from Downloads…</option>
+            </select>
+            <button type="button" id="btn-subtitle-search" class="btn btn-primary" onclick="executeSubtitleSearch()">Search English subs</button>
+          </div>
+          <div class="search-filters-row">
+            <div class="search-options">
+              <span class="timeout-label">Title override (optional):</span>
+              <input type="text" id="subtitle-query-override" placeholder="e.g. Dune Part Two" style="min-width:220px" />
+              <button type="button" class="btn btn-secondary btn-sm" onclick="loadSubtitleVideos()" title="Rescan Downloads for videos">↻ Rescan</button>
+            </div>
+          </div>
+          <div id="subtitle-video-meta" class="discover-hint">No video selected.</div>
+        </div>
+
+        <div id="subtitle-status-bar" class="search-status-bar hidden">
+          <span id="subtitle-status-text">Found 0 subtitles</span>
+        </div>
+
+        <div id="subtitle-empty-state" class="search-empty-state">
+          <div class="empty-icon">💬</div>
+          <h3>Find English subtitles</h3>
+          <p>Select a video above — the title is auto-derived from the filename (S01E02 aware) — then hit Search.</p>
+        </div>
+
+        <div id="subtitle-results-container" class="search-results-container hidden">
+          <div class="search-table-wrapper">
+            <table class="search-table">
+              <thead>
+                <tr>
+                  <th style="width: 52%;">Release / Title</th>
+                  <th style="width: 12%;">Provider</th>
+                  <th style="width: 10%;">Rating</th>
+                  <th style="width: 10%;">Downloads</th>
+                  <th style="width: 16%; text-align: right;">Action</th>
+                </tr>
+              </thead>
+              <tbody id="subtitle-results-body">
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <!-- Detail Inspector Drawer / Modal -->
       <div id="inspector-overlay" class="inspector-overlay hidden" onclick="closeInspector()"></div>
       <aside id="inspector-drawer" class="inspector-drawer hidden">
@@ -700,6 +760,12 @@
         </div>
         <span class="mobile-tab-label">Discover</span>
       </button>
+      <button id="mobile-nav-btn-subtitles" class="mobile-nav-tab" onclick="switchMainView('subtitles')" title="Subtitles (/subtitle)">
+        <div class="mobile-tab-icon-wrap">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="15" x2="18" y2="15"/></svg>
+        </div>
+        <span class="mobile-tab-label">Subs</span>
+      </button>
       <button id="mobile-nav-btn-analytics" class="mobile-nav-tab" onclick="switchMainView('analytics')" title="Swarm Analytics & Report (/report)">
         <div class="mobile-tab-icon-wrap">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
@@ -709,6 +775,6 @@
     </nav>
   </div>
 
-  <script src="/static/app.js?v=0.8.0"></script>
+  <script src="/static/app.js?v=0.9.0"></script>
 </body>
 </html>

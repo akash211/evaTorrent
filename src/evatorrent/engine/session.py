@@ -27,6 +27,21 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(float(os.environ.get(name, default)))
+    except (ValueError, TypeError):
+        return default
+
+
+def _fmt_rate(bytes_per_sec: float) -> str:
+    if bytes_per_sec >= 1024**2:
+        return f"{bytes_per_sec / 1024**2:.1f} MB/s"
+    if bytes_per_sec >= 1024:
+        return f"{bytes_per_sec / 1024:.1f} KB/s"
+    return f"{bytes_per_sec:.0f} B/s"
+
+
 # Stall timeout: no data received for this long while downloading.
 # Instead of dying into ERROR, the session backs off and retries automatically
 # (see STALL_RETRY_DELAY_SECONDS) unless the user pauses it.
@@ -62,7 +77,16 @@ class TorrentSession:
     ):
         self.torrent = torrent
         self.download_dir = Path(download_dir)
-        self.max_peers = max_peers
+        # Env-tunable cap (EVA_MAX_PEERS) with automatic down-tuning for
+        # huge torrents so a 155 GB download cannot OOM a 6 GB LXC.
+        # The explicit max_peers arg is clamped down (never up) by both.
+        from evatorrent.engine.limits import effective_peer_settings
+
+        auto_peers, _auto_pipeline = effective_peer_settings(torrent.total_length)
+        try:
+            self.max_peers = max(1, min(int(max_peers), int(auto_peers)))
+        except (ValueError, TypeError):
+            self.max_peers = max(1, int(auto_peers))
         self.port = port
         self.download_limit = download_limit
         self.db = db
@@ -70,6 +94,12 @@ class TorrentSession:
         self.stall_timeout_seconds = STALL_TIMEOUT_SECONDS
         self.stall_retry_delay_seconds = STALL_RETRY_DELAY_SECONDS
         self.stall_retries = 0
+        self._announce_failures = 0
+        # Periodic progress line in docker logs (0/empty disables).
+        try:
+            self.progress_log_seconds = float(os.environ.get("EVA_PROGRESS_LOG_SECS", 300))
+        except (ValueError, TypeError):
+            self.progress_log_seconds = 300.0
 
         self.piece_manager = PieceManager(
             torrent=torrent,
@@ -214,12 +244,21 @@ class TorrentSession:
             self.error_message = None
             self.stall_retries = 0
         have_msg = Have(piece_index=piece_index)
-        for peer_conn in self.active_peers.values():
-            if peer_conn.is_connected:
-                asyncio.create_task(peer_conn.send_message(have_msg))
+        # Bound the Have fan-out: one task for all peers instead of one
+        # task per peer per piece (50 tasks/piece melted the loop on big swarms).
+        targets = [c for c in self.active_peers.values() if c.is_connected]
+        if targets:
+            asyncio.create_task(self._broadcast_have(have_msg, targets))
 
         if self.piece_manager.is_complete:
             asyncio.create_task(self._stop_seeding_and_complete())
+
+    async def _broadcast_have(self, have_msg: Have, targets: list) -> None:
+        for peer_conn in targets:
+            try:
+                await peer_conn.send_message(have_msg)
+            except Exception:
+                pass
 
     def _on_peer_disconnected(self, peer_key: str) -> None:
         self.active_peers.pop(peer_key, None)
@@ -297,6 +336,12 @@ class TorrentSession:
                             event=event,
                         )
                         last_announce = now
+                        if self._announce_failures:
+                            logger.info(
+                                f"Tracker announce recovered for '{self.torrent.name}' "
+                                f"after {self._announce_failures} failures"
+                            )
+                        self._announce_failures = 0
                         if response and response.peers:
                             for p in response.peers:
                                 p_key = f"{p.ip}:{p.port}"
@@ -310,7 +355,16 @@ class TorrentSession:
                         else:
                             announce_interval = 60.0
                     except Exception as e:
-                        logger.debug(f"Tracker announce failed: {e}")
+                        self._announce_failures += 1
+                        # Log 1st failure and every 10th so dead trackers stay
+                        # visible in docker logs without spamming every cycle.
+                        if self._announce_failures == 1 or self._announce_failures % 10 == 0:
+                            logger.warning(
+                                f"Tracker announce failed for '{self.torrent.name}' "
+                                f"({self._announce_failures} consecutive): {e}"
+                            )
+                        else:
+                            logger.debug(f"Tracker announce failed: {e}")
                         announce_interval = 60.0
 
                 # 2. Replenish peer connections if below max_peers
@@ -340,6 +394,7 @@ class TorrentSession:
     async def _speed_meter_loop(self) -> None:
         """Calculates download speed, upload speed, and ETA every second."""
         tick = 0
+        last_progress_log = time.time()
         while self._running:
             try:
                 await asyncio.sleep(1.0)
@@ -373,6 +428,30 @@ class TorrentSession:
                 else:
                     self.eta_seconds = 0 if bytes_left == 0 else None
 
+                # Periodic heartbeat in docker logs so stuck/slow torrents are
+                # diagnosable without the Web UI (default every 5 minutes).
+                if (
+                    self.progress_log_seconds > 0
+                    and now - last_progress_log >= self.progress_log_seconds
+                ):
+                    last_progress_log = now
+                    connected = sum(1 for c in self.active_peers.values() if c.is_connected)
+                    logger.info(
+                        "[PROGRESS] '%s': %.1f%% (%d/%d pieces) %s/s down %s/s up, "
+                        "peers %d/%d, ETA %s, status=%s%s",
+                        self.torrent.name,
+                        self.piece_manager.progress_percentage,
+                        len(self.piece_manager.completed_pieces),
+                        self.torrent.piece_count,
+                        _fmt_rate(self.download_speed),
+                        _fmt_rate(self.upload_speed),
+                        connected,
+                        len(self.seen_peers),
+                        f"{self.eta_seconds}s" if self.eta_seconds else "--",
+                        self.status.value,
+                        f" ({self.error_message})" if self.error_message else "",
+                    )
+
                 # Persist progress to DB every 5 seconds
                 if self.db and tick % 5 == 0:
                     self.db.update_torrent_progress(
@@ -390,6 +469,11 @@ class TorrentSession:
     def to_dict(self) -> dict:
         """Returns JSON-serializable status snapshot of the torrent."""
         connected_count = sum(1 for c in self.active_peers.values() if c.is_connected)
+        # Cap the files payload: a 155 GB multi-file torrent can list 1000s
+        # of files, and serializing all of them every 800 ms telemetry tick
+        # kept the event loop hot. UI paginates via /pieces + /peers.
+        files = self.torrent.files
+        truncated = len(files) > 500
         return {
             "info_hash": self.torrent.info_hash_hex,
             "name": self.torrent.name,
@@ -409,6 +493,9 @@ class TorrentSession:
             "pieces_completed": len(self.piece_manager.completed_pieces),
             "piece_length": self.torrent.piece_length,
             "is_multi_file": self.torrent.is_multi_file,
-            "files": [{"path": f.path, "length": f.length, "offset": f.offset} for f in self.torrent.files],
+            "max_peers": self.max_peers,
+            "files": [{"path": f.path, "length": f.length, "offset": f.offset} for f in files[:500]],
+            "files_truncated": truncated,
+            "files_total": len(files),
             "trackers": self.torrent.trackers,
         }

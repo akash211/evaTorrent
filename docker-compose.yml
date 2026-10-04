@@ -1,6 +1,6 @@
 services:
   evatorrent:
-    image: akashkece/evatorrent:0.8.0
+    image: akashkece/evatorrent:0.9.0
     container_name: evatorrent
     restart: unless-stopped
     ports:
@@ -31,3 +31,15 @@ services:
       - TMDB_API_KEY=
       # OMDb key unlocks IMDb/RT ratings, box office, languages
       - OMDB_API_KEY=
+      # Resource safety (large torrents): unset = built-in defaults with
+      # automatic down-tuning for 20 GB+ torrents (max 15 peers / 4 pipeline).
+      - EVA_MAX_PEERS=
+      - EVA_PIPELINE_PER_PEER=
+      - EVA_MAX_ONGOING_PIECES=
+      - EVA_STREAM_BUFFER_LIMIT=
+      - EVA_TELEMETRY_SECS=
+      - EVA_VERIFY_ON_STARTUP=
+      # Seconds between [PROGRESS] docker-log lines per torrent (0 disables)
+      - EVA_PROGRESS_LOG_SECS=
+      # Optional keyed subtitle provider (keyless Yify/OpenSubtitles.org first)
+      - OPENSUBTITLES_API_KEY=

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Callable, Dict, Optional, Tuple
 
@@ -25,7 +26,23 @@ from evatorrent.tracker import Peer
 
 logger = logging.getLogger(__name__)
 
-PIPELINE_CAPACITY = 10  # Number of concurrent in-flight block requests per peer
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(float(os.environ.get(name, default)))
+    except (ValueError, TypeError):
+        return default
+
+
+def _pipeline_capacity() -> int:
+    return max(1, _env_int("EVA_PIPELINE_PER_PEER", 10))
+
+
+PIPELINE_CAPACITY = 10  # legacy constant; per-connection value now comes from _pipeline_capacity()
+
+# Bound concurrent Piece uploads per connection so 50 seed-requests cannot
+# spawn 50 unbounded send tasks at once.
+_UPLOAD_SEMAPHORES: Dict[str, asyncio.Semaphore] = {}
 
 
 class PeerConnection:
@@ -142,7 +159,8 @@ class PeerConnection:
             self.am_interested = True
 
             # 6. Stream incoming messages and run request loop
-            stream = PeerStreamIterator(self.reader)
+            # 2 MB default (was 10 MB): 50 peers x 10 MB = 500 MB RAM pressure.
+            stream = PeerStreamIterator(self.reader, buffer_limit=_env_int("EVA_STREAM_BUFFER_LIMIT", 2 * 1024 * 1024))
             request_loop_task = asyncio.create_task(self._request_blocks_loop())
 
             try:
@@ -157,6 +175,10 @@ class PeerConnection:
             logger.debug(f"Connection timeout to {self.peer_key}")
         except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
             logger.debug(f"Socket connection error to {self.peer_key}: {e}")
+        except ValueError as e:
+            # PeerStreamIterator buffer-limit breach (misbehaving/spammy peer):
+            # visible at warning so log readers see why peers keep dropping.
+            logger.warning(f"Peer stream error with {self.peer_key}: {e}")
         except Exception as e:
             logger.debug(f"PeerConnection exception with {self.peer_key}: {e}")
         finally:
@@ -191,17 +213,34 @@ class PeerConnection:
             block_data = self.piece_manager.read_block(msg.index, msg.begin, msg.length)
             if block_data:
                 piece_msg = Piece(index=msg.index, begin=msg.begin, block=block_data)
-                asyncio.create_task(self.send_message(piece_msg))
                 self.bytes_uploaded += len(block_data)
                 self._bytes_uploaded_since_last_check += len(block_data)
+                # Bounded upload: at most 2 concurrent sends per peer instead
+                # of an unbounded create_task per Request (DDoS-amplifies on
+                # popular torrents and starves the download loop).
+                asyncio.create_task(self._send_piece_bounded(piece_msg))
         elif isinstance(msg, KeepAlive):
             pass
 
+    async def _send_piece_bounded(self, piece_msg: Piece) -> None:
+        sem = _UPLOAD_SEMAPHORES.get(self.peer_key)
+        if sem is None:
+            sem = asyncio.Semaphore(2)
+            _UPLOAD_SEMAPHORES[self.peer_key] = sem
+        try:
+            async with sem:
+                await self.send_message(piece_msg)
+        finally:
+            if not self.is_connected:
+                _UPLOAD_SEMAPHORES.pop(self.peer_key, None)
+
     async def _request_blocks_loop(self) -> None:
         """Pipelined loop requesting missing blocks in parallel while unchoked."""
+        pipeline = _pipeline_capacity()
+        idle_ticks = 0
         while self.running and not self.piece_manager.is_complete:
             if not self.is_connected or self.is_choked:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)
                 continue
 
             # Check rate limiting
@@ -213,20 +252,24 @@ class PeerConnection:
             # Clean expired requests older than 10 seconds to free slots
             self._pending_requests = {k: ts for k, ts in self._pending_requests.items() if now - ts < 10.0}
 
-            available_slots = PIPELINE_CAPACITY - len(self._pending_requests)
+            available_slots = pipeline - len(self._pending_requests)
             if available_slots <= 0:
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.05)
                 continue
 
             blocks = self.piece_manager.next_requests(self.peer_key, max_count=available_slots)
             if blocks:
+                idle_ticks = 0
                 for block in blocks:
                     req_key = (block.piece_index, block.begin)
                     self._pending_requests[req_key] = now
                     req = Request(index=block.piece_index, begin=block.begin, length=block.length)
                     await self.send_message(req)
             else:
-                await asyncio.sleep(0.1)
+                # Exponential backoff when no work: 0.1s -> up to 1s so 50
+                # idle peers don't busy-poll rarest-first sorting.
+                idle_ticks += 1
+                await asyncio.sleep(min(1.0, 0.1 * (2 ** min(idle_ticks, 3))))
 
     def update_speed(self) -> None:
         """Calculates current download and upload speeds over the elapsed time interval."""

@@ -675,6 +675,7 @@ function closeAddModal() {
 async function uploadFile(file) {
   const formData = new FormData();
   formData.append('file', file);
+  logUIEvent('live', 'torrent_upload_submit', file ? file.name : '');
 
   try {
     const res = await fetch('/api/torrents/upload', {
@@ -697,6 +698,7 @@ async function submitMagnet() {
   const input = document.getElementById('magnet-input');
   const uri = input.value.trim();
   if (!uri) return;
+  logUIEvent('live', 'torrent_add_submit', uri.slice(0, 120));
 
   try {
     showToast('Adding torrent / URL to evaTorrent...', 'info');
@@ -790,6 +792,7 @@ const TAB_ROUTES = {
   live: '/home',
   search: '/search',
   discover: '/discover',
+  subtitles: '/subtitle',
   analytics: '/report',
 };
 
@@ -797,6 +800,7 @@ const TAB_TITLES = {
   live: 'evaTorrent ⚡ | Live Swarm',
   search: 'evaTorrent ⚡ | Torrent Search',
   discover: 'evaTorrent ⚡ | Discover',
+  subtitles: 'evaTorrent ⚡ | Subtitles',
   analytics: 'evaTorrent ⚡ | Swarm Analytics & Report',
 };
 
@@ -804,46 +808,67 @@ function getTabFromPath(pathname) {
   const p = (pathname || window.location.pathname).replace(/\/+$/, '') || '/';
   if (p === '/search') return 'search';
   if (p === '/discover') return 'discover';
+  if (p === '/subtitle') return 'subtitles';
   if (p === '/report') return 'analytics';
   return 'live';
 }
 
 let currentMainView = 'live';
 
+// Client-side breadcrumb beacon: reports tab switches and key clicks to the
+// server so `docker logs` shows what the user was doing when issues occurred.
+function logUIEvent(tab, action, detail) {
+  try {
+    console.info(`[UI] tab=${tab} action=${action || ''} detail=${detail || ''}`);
+    fetch('/api/ui/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tab: tab || currentMainView, action: action || '', detail: (detail || '').slice(0, 200) }),
+    }).catch(() => {});
+  } catch (_) {}
+}
+
 function switchMainView(view, updateHistory = true) {
   currentMainView = view;
+  logUIEvent(view, 'tab_switch', '');
 
   // Desktop navigation tab buttons
   const btnLive = document.getElementById('nav-btn-live');
   const btnSearch = document.getElementById('nav-btn-search');
   const btnDiscover = document.getElementById('nav-btn-discover');
+  const btnSubtitles = document.getElementById('nav-btn-subtitles');
   const btnAnalytics = document.getElementById('nav-btn-analytics');
 
   // Mobile bottom navigation tab buttons
   const mBtnLive = document.getElementById('mobile-nav-btn-live');
   const mBtnSearch = document.getElementById('mobile-nav-btn-search');
   const mBtnDiscover = document.getElementById('mobile-nav-btn-discover');
+  const mBtnSubtitles = document.getElementById('mobile-nav-btn-subtitles');
   const mBtnAnalytics = document.getElementById('mobile-nav-btn-analytics');
 
   // View panes
   const paneLive = document.getElementById('view-pane-live');
   const paneSearch = document.getElementById('view-pane-search');
   const paneDiscover = document.getElementById('view-pane-discover');
+  const paneSubtitles = document.getElementById('view-pane-subtitles');
   const paneAnalytics = document.getElementById('view-pane-analytics');
 
   if (btnLive) btnLive.classList.toggle('active', view === 'live');
   if (btnSearch) btnSearch.classList.toggle('active', view === 'search');
   if (btnDiscover) btnDiscover.classList.toggle('active', view === 'discover');
+  if (btnSubtitles) btnSubtitles.classList.toggle('active', view === 'subtitles');
   if (btnAnalytics) btnAnalytics.classList.toggle('active', view === 'analytics');
 
   if (mBtnLive) mBtnLive.classList.toggle('active', view === 'live');
   if (mBtnSearch) mBtnSearch.classList.toggle('active', view === 'search');
   if (mBtnDiscover) mBtnDiscover.classList.toggle('active', view === 'discover');
+  if (mBtnSubtitles) mBtnSubtitles.classList.toggle('active', view === 'subtitles');
   if (mBtnAnalytics) mBtnAnalytics.classList.toggle('active', view === 'analytics');
 
   if (paneLive) paneLive.classList.toggle('hidden', view !== 'live');
   if (paneSearch) paneSearch.classList.toggle('hidden', view !== 'search');
   if (paneDiscover) paneDiscover.classList.toggle('hidden', view !== 'discover');
+  if (paneSubtitles) paneSubtitles.classList.toggle('hidden', view !== 'subtitles');
   if (paneAnalytics) paneAnalytics.classList.toggle('hidden', view !== 'analytics');
 
   const targetPath = TAB_ROUTES[view] || '/home';
@@ -860,6 +885,8 @@ function switchMainView(view, updateHistory = true) {
   } else if (view === 'search') {
     loadRecentSearches();
     setTimeout(() => document.getElementById('indexer-search-query')?.focus(), 50);
+  } else if (view === 'subtitles') {
+    loadSubtitleVideos();
   } else if (view === 'discover') {
     refreshDiscoverKeyHint();
     loadDiscoverRecent();
@@ -1173,6 +1200,7 @@ async function executeTorrentSearch(forceRefresh = false) {
   const hindiOnly = document.getElementById('search-hindi-only')?.checked === true;
   const englishOnly = document.getElementById('search-english-only')?.checked === true;
   const timeoutSec = parseFloat(document.getElementById('search-timeout-select')?.value || '30');
+  logUIEvent('search', 'torrent_search_submit', `${query} [cat=${currentSearchCategory} hindi=${hindiOnly} eng=${englishOnly} timeout=${timeoutSec}s refresh=${forceRefresh}]`);
 
   const progressBox = document.getElementById('search-progress-box');
   const progressFill = document.getElementById('search-progress-fill');
@@ -1435,6 +1463,7 @@ async function executeTorrentSearch(forceRefresh = false) {
 async function downloadSearchResult(encodedMagnet, encodedTitle) {
   const magnet = decodeURIComponent(encodedMagnet);
   const title = decodeURIComponent(encodedTitle);
+  logUIEvent('search', 'search_result_download_click', title);
 
   try {
     showToast(`Adding "${title}" to evaTorrent...`, 'info');
@@ -1561,6 +1590,7 @@ async function executeDiscoverSearch(forceRefresh = false) {
   switchDiscoverSubView('search');
   lastDiscoverQuery = query;
   const year = getDiscoverYear();
+  logUIEvent('discover', 'discover_search_submit', `${query} [type=${currentDiscoverType} year=${year || 'any'} refresh=${forceRefresh}]`);
   const statusBar = document.getElementById('discover-status-bar');
   const statusText = document.getElementById('discover-status-text');
   const emptyEl = document.getElementById('discover-empty-state');
@@ -1799,6 +1829,7 @@ function discoverToTorrentSearch(idx) {
 async function saveDiscoverResult(idx) {
   const item = lastDiscoverResults[idx];
   if (!item) return;
+  logUIEvent('discover', 'discover_save_click', item.title || '');
   try {
     const res = await fetch('/api/discover/saved', {
       method: 'POST',
@@ -1898,4 +1929,125 @@ function discoverSavedToTorrentSearch(savedId) {
   if (input) input.value = saved.title || '';
   switchMainView('search');
   executeTorrentSearch(false);
+}
+
+// --- Subtitles (English subs for Downloads) ---
+
+let subtitleVideos = [];
+let subtitleResults = [];
+
+async function loadSubtitleVideos() {
+  const sel = document.getElementById('subtitle-video-select');
+  const meta = document.getElementById('subtitle-video-meta');
+  try {
+    const res = await fetch('/api/subtitles/videos');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    subtitleVideos = data.videos || [];
+    const current = sel ? sel.value : '';
+    if (sel) {
+      sel.innerHTML = '<option value="">Select a movie / episode from Downloads…</option>' +
+        subtitleVideos.map(v => {
+          const tag = v.has_subtitle ? ' ✅' : '';
+          return `<option value="${escapeHtml(v.path)}">${escapeHtml(v.name)}${tag} (${formatBytes(v.size)})</option>`;
+        }).join('');
+      if (current && subtitleVideos.some(v => v.path === current)) sel.value = current;
+    }
+    if (meta) {
+      meta.textContent = subtitleVideos.length
+        ? `${subtitleVideos.length} video(s) in Downloads. ✅ = already has a matching subtitle.`
+        : 'No video files found in Downloads yet.';
+    }
+  } catch (err) {
+    if (meta) meta.textContent = 'Failed to list videos: ' + err.message;
+  }
+}
+
+function handleSubtitleVideoChange() {
+  const sel = document.getElementById('subtitle-video-select');
+  const meta = document.getElementById('subtitle-video-meta');
+  const v = subtitleVideos.find(x => x.path === (sel ? sel.value : ''));
+  if (meta) {
+    meta.textContent = v
+      ? `${v.path} • ${formatBytes(v.size)}${v.has_subtitle ? ' • ✅ subtitle present' : ''}`
+      : 'No video selected.';
+  }
+}
+
+async function executeSubtitleSearch() {
+  const sel = document.getElementById('subtitle-video-select');
+  const override = document.getElementById('subtitle-query-override');
+  const video = sel ? sel.value : '';
+  const q = override ? override.value.trim() : '';
+  const statusBar = document.getElementById('subtitle-status-bar');
+  const statusText = document.getElementById('subtitle-status-text');
+  const emptyState = document.getElementById('subtitle-empty-state');
+  const container = document.getElementById('subtitle-results-container');
+  const tbody = document.getElementById('subtitle-results-body');
+  const btn = document.getElementById('btn-subtitle-search');
+  if (!video && !q) {
+    showToast('Select a video or enter a title override', 'error');
+    return;
+  }
+  logUIEvent('subtitles', 'subtitle_search_submit', `video=${video} override=${q}`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Searching…'; }
+  if (statusBar) statusBar.classList.add('hidden');
+  try {
+    const params = new URLSearchParams();
+    if (video) params.set('video', video);
+    if (q) params.set('q', q);
+    const res = await fetch(`/api/subtitles/search?${params.toString()}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    subtitleResults = data.results || [];
+    const derived = data.meta && (data.meta.derived_title || data.query);
+    if (statusText) statusText.textContent = `Found ${subtitleResults.length} English subtitle(s) for "${data.query}"`;
+    if (statusBar) statusBar.classList.remove('hidden');
+    if (emptyState) emptyState.classList.add('hidden');
+    if (container) container.classList.remove('hidden');
+    if (tbody) {
+      tbody.innerHTML = subtitleResults.length ? subtitleResults.map((r, i) => `
+        <tr>
+          <td><strong>${escapeHtml(r.title)}</strong><br/><span class="muted">${escapeHtml(r.release || '')}</span></td>
+          <td><span class="badge-source">${escapeHtml(r.provider)}</span></td>
+          <td>${r.rating ? escapeHtml(String(r.rating)) : '–'}</td>
+          <td>${r.downloads ? escapeHtml(String(r.downloads)) : '–'}</td>
+          <td style="text-align:right"><button class="btn btn-primary btn-sm" onclick="downloadSubtitleResult(${i})">Download .srt</button></td>
+        </tr>`).join('')
+        : '<tr><td colspan="5" class="muted">No English subtitles found. Try the title override (e.g. without year/tags).</td></tr>';
+    }
+    if (!subtitleResults.length && derived) showToast(`No subs for "${derived}"`, 'info');
+  } catch (err) {
+    showToast('Subtitle search failed: ' + err.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Search English subs'; }
+  }
+}
+
+async function downloadSubtitleResult(i) {
+  const r = subtitleResults[i];
+  const sel = document.getElementById('subtitle-video-select');
+  const video = sel ? sel.value : '';
+  if (!r || !video) {
+    showToast('Select a video first', 'error');
+    return;
+  }
+  logUIEvent('subtitles', 'subtitle_download_click', `${r.provider}: ${r.title} -> ${video}`);
+  try {
+    showToast('Downloading subtitle (zip extracted server-side)…', 'info');
+    const res = await fetch('/api/subtitles/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video, download_url: r.download_url, provider: r.provider }),
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(`Saved ${data.saved_as} (${formatBytes(data.size_bytes)})`, 'success');
+      loadSubtitleVideos();
+    } else {
+      showToast(data.detail || 'Subtitle download failed', 'error');
+    }
+  } catch (err) {
+    showToast('Subtitle download failed: ' + err.message, 'error');
+  }
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
@@ -46,8 +47,15 @@ class PieceManager:
         self.ongoing_pieces: Set[int] = set()
         self.completed_pieces: Set[int] = set()
 
-        # Peer availability mapping: peer_key (str) -> Set of piece indices
-        self.peers: Dict[str, Set[int]] = {}
+        # Peer availability mapping: peer_key -> Set of piece indices,
+        # or None meaning "seeder has everything" (avoids duplicating a
+        # 155 GB / 100k-piece set per seeder -> 100s of MB on small hosts).
+        self.peers: Dict[str, Optional[Set[int]]] = {}
+
+        # Cached rarest-first availability counts (recomputed at most every
+        # RAREST_REFRESH_SECS to avoid O(P*N) sorts on every request loop tick).
+        self._rarity_counts: Dict[int, int] = {}
+        self._rarity_computed_at: float = 0.0
 
         self.bytes_downloaded: int = 0
         self.bytes_uploaded: int = 0
@@ -69,15 +77,48 @@ class PieceManager:
             if bitfield.has_piece(idx):
                 pieces_set.add(idx)
         self.peers[peer_key] = pieces_set
+        self._rarity_computed_at = 0.0  # invalidate cached counts
 
     def peer_has_piece(self, peer_key: str, piece_index: int) -> None:
         """Records an individual piece advertised by a peer via Have message."""
-        if peer_key not in self.peers:
-            self.peers[peer_key] = set()
-        self.peers[peer_key].add(piece_index)
+        avail = self.peers.get(peer_key)
+        if avail is None:
+            if peer_key in self.peers:
+                return  # seeder sentinel: already has everything
+            self.peers[peer_key] = {piece_index}
+        else:
+            avail.add(piece_index)
+        # Incremental rarity update; full recompute happens lazily.
+        self._rarity_counts[piece_index] = self._rarity_counts.get(piece_index, 0) + 1
+
+    def _peer_has(self, peer_pieces: Optional[Set[int]], piece_idx: int) -> bool:
+        """None sentinel means seeder (has all pieces)."""
+        if peer_pieces is None:
+            return True
+        return piece_idx in peer_pieces
+
+    def _refresh_rarity_counts(self) -> None:
+        """Recomputes per-piece availability at most every RAREST_REFRESH_SECS."""
+        try:
+            refresh = float(os.environ.get("EVA_RAREST_REFRESH_SECS", 10.0))
+        except (ValueError, TypeError):
+            refresh = 10.0
+        now = time.time()
+        if now - self._rarity_computed_at < refresh and self._rarity_counts:
+            return
+        counts: Dict[int, int] = {}
+        for avail in self.peers.values():
+            if avail is None:
+                continue  # seeder: every piece +1 would be O(P*N); skip, rarity still relative
+            for idx in avail:
+                counts[idx] = counts.get(idx, 0) + 1
+        # Seeders counted implicitly: treat unlisted pieces as rarer (correct bias).
+        self._rarity_counts = counts
+        self._rarity_computed_at = now
 
     def remove_peer(self, peer_key: str) -> None:
         self.peers.pop(peer_key, None)
+        self._rarity_computed_at = 0.0
 
     def get_bitfield(self) -> Bitfield:
         """Returns our current bitfield representing completed pieces."""
@@ -90,11 +131,40 @@ class PieceManager:
         return Bitfield(bytes(buf))
 
     def peer_has_all_pieces(self, peer_key: str) -> None:
-        """Marks that a peer (e.g. an unchoking seeder) possesses all pieces."""
-        self.peers[peer_key] = set(range(len(self.pieces)))
+        """Marks that a peer (e.g. an unchoking seeder) possesses all pieces.
 
-    def check_existing_files(self) -> int:
-        """Verifies files on disk against torrent piece hashes to restore completed pieces or detect deletion."""
+        Uses a None sentinel instead of duplicating a 100k-entry set per
+        seeder (a 155 GB torrent would otherwise cost 100s of MB with 50 peers).
+        """
+        self.peers[peer_key] = None
+        self._rarity_computed_at = 0.0
+
+    def check_existing_files(self, verify_mode: Optional[str] = None) -> int:
+        """Verifies files on disk against torrent piece hashes to restore completed pieces or detect deletion.
+
+        verify_mode: "full" | "quick" | "off" (default from EVA_VERIFY_ON_STARTUP).
+        - off: skip hashing entirely (fast boot for huge torrents; pieces
+          re-verify as they complete). Marks everything missing.
+        - quick (default): full correctness, but skips SHA-1 for sparse/empty
+          regions. A fresh 155 GB add creates empty .part files; without this
+          fast path boot would SHA-1 155 GB of zeros and peg the CPU.
+        - full: legacy behaviour, hashes every piece.
+        """
+        mode = (verify_mode or os.environ.get("EVA_VERIFY_ON_STARTUP", "quick")).lower()
+        if mode == "off":
+            logger.warning(
+                "[VERIFY] '%s': EVA_VERIFY_ON_STARTUP=off, skipping disk verification "
+                "(%d pieces marked missing; progress restarts from 0)",
+                self.torrent.name,
+                self.torrent.piece_count,
+            )
+            self.completed_pieces.clear()
+            self.ongoing_pieces.clear()
+            self.missing_pieces = set(range(self.torrent.piece_count))
+            for p in self.pieces:
+                p.reset()
+            self.bytes_downloaded = 0
+            return 0
         any_file_exists = any(
             (self.disk_writer.output_dir / f.path).exists() or (self.disk_writer.output_dir / f"{f.path}.part").exists()
             for f in self.torrent.files
@@ -115,17 +185,58 @@ class PieceManager:
         for p in self.pieces:
             p.reset()
 
+        total = len(self.pieces)
+        t_start = time.time()
+        # A 155 GB verify reads 155 GB and previously logged nothing until done —
+        # if the host died mid-verify the logs showed no trace. Log progress.
+        log_progress = total >= 2000
+        if self.torrent.piece_count >= 500:
+            logger.info(
+                "[VERIFY] '%s': verifying %d pieces (%.2f GB, mode=%s)...",
+                self.torrent.name,
+                total,
+                self.torrent.total_length / (1024**3),
+                mode,
+            )
+        next_log_at = 0.1
         for idx, piece in enumerate(self.pieces):
             try:
                 data = self.disk_writer.read_piece(idx)
-                if len(data) == piece.length and hashlib.sha1(data).digest() == piece.expected_hash:
+                if len(data) != piece.length:
+                    continue
+                if mode != "full" and len(data) > 0 and not any(data):
+                    # All-zero buffer = unwritten sparse region. Skip SHA-1:
+                    # hashing 155 GB of zeros is what pegged CPUs on fresh adds.
+                    continue
+                if hashlib.sha1(data).digest() == piece.expected_hash:
                     self.completed_pieces.add(idx)
                     self.missing_pieces.discard(idx)
                     verified += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[VERIFY] '{self.torrent.name}' piece {idx}: unreadable ({e})")
+            if log_progress:
+                frac = (idx + 1) / total
+                if frac >= next_log_at:
+                    logger.info(
+                        "[VERIFY] '%s': %d%% (%d/%d pieces, %d verified so far)",
+                        self.torrent.name,
+                        int(frac * 100),
+                        idx + 1,
+                        total,
+                        verified,
+                    )
+                    next_log_at += 0.1
 
         self.bytes_downloaded = sum(self.torrent.piece_size(i) for i in self.completed_pieces)
+        if self.torrent.piece_count >= 500 or verified:
+            logger.info(
+                "[VERIFY] '%s': done in %.1fs — %d/%d pieces verified (%.1f%%)",
+                self.torrent.name,
+                time.time() - t_start,
+                verified,
+                total,
+                (verified / total * 100.0) if total else 100.0,
+            )
         return verified
 
     def read_block(self, piece_index: int, begin: int, length: int) -> Optional[bytes]:
@@ -149,16 +260,16 @@ class PieceManager:
 
     def next_requests(self, peer_key: str, max_count: int = 4) -> List[Block]:
         """Pipelined block selector: returns up to max_count blocks to request from this peer."""
-        peer_pieces = self.peers.get(peer_key)
-        if not peer_pieces:
+        if peer_key not in self.peers:
             return []
+        peer_pieces = self.peers.get(peer_key)
 
         now = time.time()
         blocks_to_request: List[Block] = []
 
         # 1. First priority: timed-out blocks in ongoing pieces this peer has
         for piece_idx in list(self.ongoing_pieces):
-            if piece_idx in peer_pieces:
+            if self._peer_has(peer_pieces, piece_idx):
                 piece = self.pieces[piece_idx]
                 for block in piece.blocks:
                     if not block.is_complete:
@@ -170,7 +281,7 @@ class PieceManager:
 
         # 2. Second priority: unrequested blocks in ongoing pieces
         for piece_idx in list(self.ongoing_pieces):
-            if piece_idx in peer_pieces:
+            if self._peer_has(peer_pieces, piece_idx):
                 piece = self.pieces[piece_idx]
                 for block in piece.blocks:
                     if not block.is_complete and block.requested_time == 0.0:
@@ -179,34 +290,48 @@ class PieceManager:
                         if len(blocks_to_request) >= max_count:
                             return blocks_to_request
 
-        # 3. Third priority: start new missing pieces that this peer has (rarest-first)
-        # Sort by availability (fewest peers → most rare → download first)
-        def _availability(idx: int) -> int:
-            return sum(1 for avail in self.peers.values() if idx in avail)
-
-        rarest_missing = sorted(
-            (idx for idx in self.missing_pieces if idx in peer_pieces and idx not in self.ongoing_pieces),
-            key=_availability,
-        )
-        for piece_idx in rarest_missing:
-            self.missing_pieces.remove(piece_idx)
-            self.ongoing_pieces.add(piece_idx)
-            piece = self.pieces[piece_idx]
-            for block in piece.blocks:
-                if not block.is_complete and block.requested_time == 0.0:
-                    block.mark_requested()
-                    blocks_to_request.append(block)
-                    if len(blocks_to_request) >= max_count:
-                        return blocks_to_request
-            if len(blocks_to_request) >= max_count:
-                break
+        # 3. Third priority: start new missing pieces that this peer has (rarest-first).
+        # Cached availability + sampling keeps this O(K log K) instead of
+        # O(P*N) sorted(all_missing) on every request-loop tick (50 peers x
+        # 100k pieces melted CPUs on 155 GB torrents).
+        try:
+            sort_cap = int(float(os.environ.get("EVA_RAREST_SORT_CAP", 2000)))
+        except (ValueError, TypeError):
+            sort_cap = 2000
+        try:
+            max_ongoing = int(float(os.environ.get("EVA_MAX_ONGOING_PIECES", 32)))
+        except (ValueError, TypeError):
+            max_ongoing = 32
+        if len(self.ongoing_pieces) < max(1, max_ongoing):
+            self._refresh_rarity_counts()
+            counts = self._rarity_counts
+            if peer_pieces is None:
+                candidates = [i for i in self.missing_pieces if i not in self.ongoing_pieces]
+            else:
+                candidates = [i for i in self.missing_pieces if i in peer_pieces and i not in self.ongoing_pieces]
+            if len(candidates) > sort_cap:
+                # Deterministic head-sample: bounds CPU while keeping progress.
+                candidates = candidates[:sort_cap]
+            candidates.sort(key=lambda idx: counts.get(idx, 0))
+            for piece_idx in candidates:
+                self.missing_pieces.remove(piece_idx)
+                self.ongoing_pieces.add(piece_idx)
+                piece = self.pieces[piece_idx]
+                for block in piece.blocks:
+                    if not block.is_complete and block.requested_time == 0.0:
+                        block.mark_requested()
+                        blocks_to_request.append(block)
+                        if len(blocks_to_request) >= max_count:
+                            return blocks_to_request
+                if len(blocks_to_request) >= max_count:
+                    break
 
         # 4. Endgame: when only a few pieces remain, re-request in-flight blocks
         # from additional peers. First response wins; duplicates are ignored
         # on receipt (see on_block_received), so this only costs bandwidth.
         if not blocks_to_request and len(self.missing_pieces) + len(self.ongoing_pieces) <= ENDGAME_REMAINING_PIECES:
             for piece_idx in list(self.ongoing_pieces):
-                if piece_idx not in peer_pieces:
+                if not self._peer_has(peer_pieces, piece_idx):
                     continue
                 piece = self.pieces[piece_idx]
                 for block in piece.blocks:
