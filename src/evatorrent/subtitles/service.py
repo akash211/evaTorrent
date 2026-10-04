@@ -301,10 +301,14 @@ class SubtitleService:
             "errors": errors,
         }
 
-    async def download_for_video(self, video_rel: str, download_url: str, provider: str = "") -> dict:
+    async def download_for_video(
+        self, video_rel: str, download_url: str, provider: str = "", detail_url: str = ""
+    ) -> dict:
         """Downloads, extracts, validates and saves subtitle next to the video.
 
         Saved name always matches the video stem (e.g. ``Movie.2024.srt``).
+        Sends a Referer (the provider detail page): several hosts (Yify)
+        reject hotlinked downloads with 403 otherwise.
         """
         base = self.download_dir.resolve()
         target_video = (base / video_rel).resolve()
@@ -319,10 +323,24 @@ class SubtitleService:
         if not download_url.startswith(("http://", "https://")):
             raise ValueError("Invalid subtitle download URL.")
 
+        # Hotlink protection (Yify answers 403 without one): prefer the
+        # provider detail page, else the file host origin.
+        referer = (detail_url or "").strip()
+        if not referer.startswith(("http://", "https://")):
+            try:
+                from urllib.parse import urlsplit
+
+                parts = urlsplit(download_url)
+                referer = f"{parts.scheme}://{parts.netloc}/"
+            except Exception:
+                referer = ""
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) evaTorrent/0.9"}
+        if referer:
+            headers["Referer"] = referer
         async with httpx.AsyncClient(
             timeout=self.timeout,
             follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) evaTorrent/0.9"},
+            headers=headers,
         ) as client:
             resp = await client.get(download_url)
             if resp.status_code != 200 or not resp.content:

@@ -153,6 +153,99 @@ async def test_yify_by_imdb_invalid_and_missing():
 
 
 @pytest.mark.asyncio
+async def test_download_sends_referer(tmp_path):
+    import io
+    import zipfile
+
+    from evatorrent.subtitles.service import SubtitleService
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("m.en.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    payload = buf.getvalue()
+    seen: dict = {}
+
+    class FakeResp:
+        status_code = 200
+        content = payload
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            seen.update(kw.get("headers", {}))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            seen["url"] = url
+            return FakeResp()
+
+    import evatorrent.subtitles.service as svc_mod
+
+    real_client = svc_mod.httpx.AsyncClient
+    svc_mod.httpx.AsyncClient = FakeClient
+    try:
+        (tmp_path / "Movie.2024.mkv").write_bytes(b"fake")
+        svc = SubtitleService(download_dir=tmp_path)
+        out = await svc.download_for_video(
+            "Movie.2024.mkv",
+            "https://subs.example.com/subtitle/1.zip",
+            "yify",
+            "https://subs.example.com/subtitles/movie-english-1",
+        )
+        assert out["success"] is True
+        assert out["saved_as"] == "Movie.2024.srt"
+        assert seen.get("Referer") == "https://subs.example.com/subtitles/movie-english-1"
+    finally:
+        svc_mod.httpx.AsyncClient = real_client
+
+
+@pytest.mark.asyncio
+async def test_download_referer_falls_back_to_origin(tmp_path):
+    import io
+    import zipfile
+
+    from evatorrent.subtitles.service import SubtitleService
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("m.en.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    seen: dict = {}
+
+    class FakeResp:
+        status_code = 200
+        content = buf.getvalue()
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            seen.update(kw.get("headers", {}))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            return FakeResp()
+
+    import evatorrent.subtitles.service as svc_mod
+
+    real_client = svc_mod.httpx.AsyncClient
+    svc_mod.httpx.AsyncClient = FakeClient
+    try:
+        (tmp_path / "Movie.2024.mkv").write_bytes(b"fake")
+        svc = SubtitleService(download_dir=tmp_path)
+        await svc.download_for_video("Movie.2024.mkv", "https://subs.example.com/subtitle/1.zip", "yify", "")
+        assert seen.get("Referer") == "https://subs.example.com/"
+    finally:
+        svc_mod.httpx.AsyncClient = real_client
+
+
+@pytest.mark.asyncio
 async def test_search_prefers_imdb_path(tmp_path, monkeypatch):
     import evatorrent.subtitles.service as svc_mod
     from evatorrent.subtitles.service import SubtitleService

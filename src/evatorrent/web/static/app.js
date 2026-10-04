@@ -2281,7 +2281,7 @@ async function downloadSubtitleResult(i) {
     const res = await fetch('/api/subtitles/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ video, download_url: r.download_url, provider: r.provider }),
+      body: JSON.stringify({ video, download_url: r.download_url, provider: r.provider, detail_url: r.detail_url || '' }),
     });
     const data = await res.json();
     if (res.ok && data.success) {

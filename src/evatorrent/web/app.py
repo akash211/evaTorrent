@@ -1240,6 +1240,7 @@ class SubtitleDownloadRequest(BaseModel):
     video: str
     download_url: str
     provider: Optional[str] = ""
+    detail_url: Optional[str] = ""
 
 
 @app.post("/api/subtitles/download")
@@ -1253,7 +1254,9 @@ async def download_subtitle(req: SubtitleDownloadRequest, user: str = Depends(ge
         f"[SUBTITLES] User '{user}' downloading sub for '{req.video}' via {req.provider or 'unknown'}: {req.download_url[:120]}"
     )
     try:
-        result = await _subtitle_service().download_for_video(req.video, req.download_url, req.provider or "")
+        result = await _subtitle_service().download_for_video(
+            req.video, req.download_url, req.provider or "", req.detail_url or ""
+        )
     except ValueError as e:
         logger.warning(f"[SUBTITLES] User '{user}' download for '{req.video}' rejected: {e}")
         raise HTTPException(status_code=400, detail=str(e))
