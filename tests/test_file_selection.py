@@ -225,3 +225,29 @@ def test_priority_validation():
         pm.set_file_priorities({})
         assert pm.skipped_pieces == set()
         assert pm.selected_files is None
+
+
+def test_file_finalized_as_soon_as_done():
+    """A finished file drops .part immediately, without waiting for the torrent."""
+    torrent, payloads = make_multi_torrent()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = PieceManager(torrent, Path(tmpdir))
+        pm.peer_has_all_pieces("1.2.3.4:6881")
+        assert pm.on_block_received(0, 0, payloads[0]) is True
+        assert (Path(tmpdir) / "series" / "ep1.mkv").exists()
+        assert not (Path(tmpdir) / "series" / "ep1.mkv.part").exists()
+        # ep2/ep3 untouched: still .part, torrent incomplete.
+        assert pm.is_complete is False
+        assert (Path(tmpdir) / "series" / "ep2.mkv.part").exists()
+
+
+def test_verify_finalizes_complete_files_on_boot():
+    torrent, payloads = make_multi_torrent()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = PieceManager(torrent, Path(tmpdir))
+        pm.disk_writer.write_piece(0, payloads[0])
+        # Simulate a restart: fresh manager verifies disk...
+        pm2 = PieceManager(torrent, Path(tmpdir))
+        assert pm2.check_existing_files(verify_mode="full") == 1
+        # ...and the finished file is already a plain .mkv for Filebrowser.
+        assert (Path(tmpdir) / "series" / "ep1.mkv").exists()

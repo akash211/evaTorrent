@@ -78,6 +78,24 @@ class DiskWriter:
         if bytes_written != len(data):
             logger.warning(f"Piece {piece_index}: Expected to write {len(data)} bytes, wrote {bytes_written}")
 
+    def finalize_file(self, path: str) -> bool:
+        """Renames one file's .part to its final name. Returns True if renamed."""
+        for f in self.files:
+            if f.path != path:
+                continue
+            part_path = self.output_dir / f"{f.path}.part"
+            final_path = self.output_dir / f.path
+            if part_path.exists() and not final_path.exists():
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.move(str(part_path), str(final_path))
+                except OSError:
+                    return False
+                logger.info(f"Finalized '{f.path}' (removed .part extension)")
+                return True
+            return final_path.exists()
+        return False
+
     def finalize(self, selected_paths: Optional[Set[str]] = None) -> None:
         """Renames .part files to their final filenames once download is verified.
 

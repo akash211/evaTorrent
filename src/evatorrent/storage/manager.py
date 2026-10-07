@@ -54,6 +54,8 @@ class PieceManager:
         self.missing_pieces: Set[int] = set(range(torrent.piece_count))
         self.ongoing_pieces: Set[int] = set()
         self.completed_pieces: Set[int] = set()
+        # Files already renamed from .part to final (per-file finalize).
+        self.finalized_files: Set[str] = set()
         # Pieces excluded by per-file selection (never requested/hashed).
         self.skipped_pieces: Set[int] = set()
         # None = all files selected. Otherwise the set of selected file paths.
@@ -110,6 +112,33 @@ class PieceManager:
             last = (f.offset + max(f.length, 1) - 1) // self.torrent.piece_length
             out.update(range(first, min(last, self.torrent.piece_count - 1) + 1))
         return out
+
+    def _file_is_complete(self, path: str) -> bool:
+        """True when every piece overlapping this file is verified."""
+        if path in self.finalized_files:
+            return True
+        for idx in self._pieces_overlapping_files({path}):
+            if idx not in self.completed_pieces:
+                return False
+        return True
+
+    def _maybe_finalize_files(self) -> None:
+        """Renames .part -> final for each fully-verified selected file.
+
+        Files appear as .mkv in Filebrowser the moment their own pieces are
+        done, instead of waiting for the whole torrent.
+        """
+        for f in self.torrent.files:
+            if f.path in self.finalized_files:
+                continue
+            if not self.is_file_selected(f.path):
+                continue
+            if self._file_is_complete(f.path):
+                try:
+                    if self.disk_writer.finalize_file(f.path):
+                        self.finalized_files.add(f.path)
+                except Exception as e:
+                    logger.debug(f"Finalize of '{f.path}' deferred: {e}")
 
     def is_file_selected(self, path: str) -> bool:
         return self.selected_files is None or path in self.selected_files
@@ -188,6 +217,10 @@ class PieceManager:
         self.piece_priorities = piece_prio
         self._recompute_selected_bytes()
         self._rarity_computed_at = 0.0
+        try:
+            self._maybe_finalize_files()
+        except Exception:
+            pass
 
     def _apply_selection(self, selected: Set[str]) -> None:
         """Legacy include/exclude path (all selected files get normal priority)."""
@@ -430,6 +463,12 @@ class PieceManager:
                 total,
                 (verified / total * 100.0) if total else 100.0,
             )
+        # Files already complete on disk lose .part immediately (Filebrowser
+        # shows .mkv right after boot, not after the whole torrent finishes).
+        try:
+            self._maybe_finalize_files()
+        except Exception as e:
+            logger.debug(f"[VERIFY] post-verify finalize deferred: {e}")
         return verified
 
     def read_block(self, piece_index: int, begin: int, length: int) -> Optional[bytes]:
@@ -594,6 +633,12 @@ class PieceManager:
                 if self.is_complete:
                     selected = None if self.selected_files is None else set(self.selected_files)
                     self.disk_writer.finalize(selected_paths=selected)
+                    for f in self.torrent.files:
+                        if selected is None or f.path in selected:
+                            self.finalized_files.add(f.path)
+                else:
+                    # Per-file finalize: finished files drop .part immediately.
+                    self._maybe_finalize_files()
 
                 if self.on_piece_complete:
                     self.on_piece_complete(index)
