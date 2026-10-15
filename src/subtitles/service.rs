@@ -10,7 +10,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::subtitles::providers::{search_opensubtitles_org, search_yify, SubtitleResult};
+use crate::subtitles::providers::{
+    search_opensubtitles_com, search_opensubtitles_org, search_yify, SubtitleResult,
+};
 
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "mpg", "mpeg",
@@ -273,6 +275,48 @@ pub struct SubtitleService {
     pub timeout_secs: f64,
 }
 
+/// OpenSubtitles.com file links (`/api/v1/download/{file_id}`) are not direct
+/// downloads: they must be exchanged via POST + API key for a temporary link.
+/// Any other URL passes through untouched (failure also falls back to it).
+async fn resolve_oscom_link(client: &reqwest::Client, download_url: &str) -> String {
+    if !download_url.contains("api.opensubtitles.com/api/v1/download/") {
+        return download_url.to_string();
+    }
+    let api_key = std::env::var("OPENSUBTITLES_API_KEY").unwrap_or_default();
+    if api_key.trim().is_empty() {
+        return download_url.to_string();
+    }
+    let file_id: u64 = download_url
+        .rsplit('/')
+        .next()
+        .and_then(|s| s.split(['?', '#']).next()?.parse().ok())
+        .unwrap_or(0);
+    if file_id == 0 {
+        return download_url.to_string();
+    }
+    let Ok(resp) = client
+        .post(download_url)
+        .header("Api-Key", api_key.trim())
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({"file_id": file_id}))
+        .send()
+        .await
+    else {
+        return download_url.to_string();
+    };
+    if !resp.status().is_success() {
+        return download_url.to_string();
+    }
+    if let Ok(v) = resp.json::<serde_json::Value>().await {
+        if let Some(link) = v.get("link").and_then(|l| l.as_str()) {
+            if link.starts_with("http://") || link.starts_with("https://") {
+                return link.to_string();
+            }
+        }
+    }
+    download_url.to_string()
+}
+
 impl SubtitleService {
     pub fn new(download_dir: impl AsRef<Path>, timeout_secs: f64) -> Self {
         Self {
@@ -298,10 +342,25 @@ impl SubtitleService {
 
         let mut results: Vec<SubtitleResult> = Vec::new();
         results.extend(search_yify(&client, q, limit).await);
+        let oscom_keyed = !std::env::var("OPENSUBTITLES_API_KEY")
+            .unwrap_or_default()
+            .trim()
+            .is_empty();
+        if oscom_keyed && results.len() < limit {
+            results.extend(search_opensubtitles_com(&client, q, limit).await);
+        }
         if results.len() < limit {
             results.extend(search_opensubtitles_org(&client, q, limit).await);
         }
 
+        // Rank like the Python engine: most-downloaded first, then rating.
+        results.sort_by(|a, b| {
+            b.downloads.cmp(&a.downloads).then(
+                b.rating
+                    .partial_cmp(&a.rating)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
         let mut seen = HashSet::new();
         let mut ranked = Vec::new();
         for r in results {
@@ -313,11 +372,15 @@ impl SubtitleService {
             }
         }
 
+        let mut providers = vec!["yify", "opensubtitles_org"];
+        if oscom_keyed {
+            providers.push("opensubtitles_com");
+        }
         Ok(json!({
             "query": q,
             "language": "en",
             "results": ranked,
-            "providers_queried": ["yify", "opensubtitles_org"],
+            "providers_queried": providers,
             "errors": [],
         }))
     }
@@ -354,7 +417,8 @@ impl SubtitleService {
             .build()
             .map_err(|e| e.to_string())?;
 
-        let mut req = client.get(download_url);
+        let effective_url = resolve_oscom_link(&client, download_url).await;
+        let mut req = client.get(effective_url.clone());
         if detail_url.starts_with("http://") || detail_url.starts_with("https://") {
             req = req.header("Referer", detail_url);
         }
@@ -369,7 +433,7 @@ impl SubtitleService {
             ));
         }
         let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-        let (content, ext) = extract_subtitle_from_bytes(&bytes, download_url)?;
+        let (content, ext) = extract_subtitle_from_bytes(&bytes, &effective_url)?;
 
         let stem = target_video
             .file_stem()

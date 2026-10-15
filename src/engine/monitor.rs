@@ -19,15 +19,26 @@ pub struct SystemHealth {
 }
 
 pub fn read_rss_mb() -> Option<f64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        if line.starts_with("VmRSS:") {
-            let kb_str = line.split_whitespace().nth(1)?;
-            let kb: f64 = kb_str.parse().ok()?;
-            return Some((kb / 1024.0 * 10.0).round() / 10.0);
+    // Fast path on Linux: /proc/self/status.
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if line.starts_with("VmRSS:") {
+                let kb_str = line.split_whitespace().nth(1)?;
+                let kb: f64 = kb_str.parse().ok()?;
+                return Some((kb / 1024.0 * 10.0).round() / 10.0);
+            }
         }
     }
-    None
+    // Portable fallback (Windows/macOS/small containers): sysinfo.
+    sysinfo_rss_mb()
+}
+
+fn sysinfo_rss_mb() -> Option<f64> {
+    let sys = sysinfo::System::new_all();
+    let pid = sysinfo::get_current_pid().ok()?;
+    let proc = sys.process(pid)?;
+    let mb = proc.memory() as f64 / 1024.0 / 1024.0;
+    Some((mb * 10.0).round() / 10.0)
 }
 
 fn read_cgroup_file(names: &[&str]) -> Option<String> {
@@ -79,26 +90,61 @@ pub fn cgroup_cpu_throttled_secs() -> Option<f64> {
     None
 }
 
-/// Queries available and total disk space (in MB) for `dir` using `df -Pk`.
+/// Queries available and total disk space (in MB) for `dir`.
+/// Tries `df -Pk` first (Unix), then falls back to sysinfo (Windows/macOS).
 pub fn disk_space_mb(dir: &Path) -> (Option<f64>, Option<f64>) {
+    if let Some(pair) = disk_space_df(dir) {
+        return pair;
+    }
+    sysinfo_disk_space_mb(dir)
+}
+
+fn disk_space_df(dir: &Path) -> Option<(Option<f64>, Option<f64>)> {
     let out = Command::new("df").arg("-Pk").arg(dir).output().ok();
-    let Some(output) = out.filter(|o| o.status.success()) else {
-        return (None, None);
-    };
+    let output = out.filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&output.stdout);
-    let Some(line) = text.lines().nth(1) else {
-        return (None, None);
-    };
+    let line = text.lines().nth(1)?;
     let cols: Vec<&str> = line.split_whitespace().collect();
     if cols.len() < 4 {
-        return (None, None);
+        return None;
     }
     let total_kb = cols[1].parse::<f64>().ok();
     let avail_kb = cols[3].parse::<f64>().ok();
-    (
+    Some((
         avail_kb.map(|k| (k / 1024.0 * 10.0).round() / 10.0),
         total_kb.map(|k| (k / 1024.0 * 10.0).round() / 10.0),
-    )
+    ))
+}
+
+fn sysinfo_disk_space_mb(dir: &Path) -> (Option<f64>, Option<f64>) {
+    let target = norm_path(&dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()));
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    // Longest mount-point prefix wins (handles overlapping mounts).
+    let mut best: Option<(usize, u64, u64)> = None;
+    for d in disks.list() {
+        let mount = norm_path(d.mount_point());
+        if !mount.is_empty() && target.starts_with(&mount) {
+            let longer = best.map(|(l, _, _)| mount.len() > l).unwrap_or(true);
+            if longer {
+                best = Some((mount.len(), d.available_space(), d.total_space()));
+            }
+        }
+    }
+    match best {
+        Some((_, avail_b, total_b)) => (
+            Some((avail_b as f64 / 1024.0 / 1024.0 * 10.0).round() / 10.0),
+            Some((total_b as f64 / 1024.0 / 1024.0 * 10.0).round() / 10.0),
+        ),
+        None => (None, None),
+    }
+}
+
+/// Normalizes a path for prefix comparison: strips Windows `\\?\` verbatim
+/// prefixes, unifies separators, lowercases (case-insensitive filesystems).
+fn norm_path(p: &Path) -> String {
+    let s = p.to_str().unwrap_or("").replace('/', "\\");
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    s.to_lowercase()
 }
 
 pub fn get_system_health(download_dir: &Path) -> SystemHealth {
@@ -177,4 +223,26 @@ pub fn write_heartbeat(data_dir: &Path) {
 #[allow(dead_code)]
 pub struct ResourceMonitor {
     pub data_dir: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rss_is_reported_on_all_platforms() {
+        // Must be Some on Linux (/proc), Windows and macOS (sysinfo fallback).
+        let rss = read_rss_mb();
+        assert!(rss.is_some(), "RSS should be measurable on this platform");
+        assert!(rss.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn disk_space_is_reported_on_all_platforms() {
+        let dir = std::env::current_dir().unwrap();
+        let (free_mb, total_mb) = disk_space_mb(&dir);
+        assert!(free_mb.is_some(), "free disk should be measurable");
+        assert!(total_mb.is_some(), "total disk should be measurable");
+        assert!(total_mb.unwrap() >= free_mb.unwrap());
+    }
 }
