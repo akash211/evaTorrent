@@ -202,6 +202,18 @@
     var ctx = cv.getContext('2d');
     var w = cv.width, h = cv.height;
     ctx.clearRect(0, 0, w, h);
+    var peak = Math.max.apply(null, evaDlHist.concat(evaUlHist).concat([0]));
+    if (peak <= 0) {
+      // Idle: flat line would look broken — draw a dashed baseline + label.
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, h - 4); ctx.lineTo(w, h - 4); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.font = '9px sans-serif';
+      ctx.fillText('idle', 4, h - 8);
+      return;
+    }
     function line(arr, color) {
       if (arr.length < 2) return;
       var max = Math.max.apply(null, arr.concat([1]));
@@ -383,6 +395,28 @@
     var tab = evaEl('tab-files');
     if (tab && tab.classList.contains('active')) evaAugmentFiles();
   }, 800);
+
+  // Manual subtitle mode: search by title alone works (backend needs only `q`);
+  // saving still needs a downloaded video, so without one we copy the link.
+  var evaOrigDlSub = window.downloadSubtitleResult;
+  window.downloadSubtitleResult = async function (i) {
+    var r = (typeof subtitleResults !== 'undefined' ? subtitleResults : [])[i];
+    var sel = evaEl('subtitle-video-select');
+    var video = sel ? sel.value : '';
+    if (r && !video) {
+      var link = r.download_url || r.detail_url || '';
+      try {
+        if (navigator.clipboard && link) await navigator.clipboard.writeText(link);
+        if (typeof showToast === 'function') {
+          showToast(link ? 'No video selected — provider link copied. Select a video to save .srt directly.' : 'Select a video to save the .srt', 'info');
+        }
+      } catch (e) {
+        if (typeof showToast === 'function') showToast('Select a video first to save the .srt', 'error');
+      }
+      return;
+    }
+    if (typeof evaOrigDlSub === 'function') return evaOrigDlSub(i);
+  };
 
   // ---------- 6. Bulk + batch ----------
   window.bulkAction = async function (action) {

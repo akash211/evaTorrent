@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <link rel="stylesheet" href="/static/style.css?v=1.0.0" />
+  <link rel="stylesheet" href="/static/style.css?v=1.0.1" />
 </head>
 <body>
   <div class="app-container">
@@ -50,7 +50,8 @@
           <span class="stat-label">SYS</span>
           <span class="stat-value" id="sys-res-text">-- MB • -- GB free</span>
         </div>
-        <div class="stat-pill spark-pill" title="60s download/upload throughput history">
+        <div class="stat-pill spark-pill" title="Live 60-second download (cyan) / upload (purple) throughput history">
+          <span class="stat-label">60s</span>
           <canvas id="sparkline" width="120" height="28"></canvas>
         </div>
       </div>
@@ -466,7 +467,7 @@
         <div class="search-hero">
           <div class="search-hero-content">
             <h2>Subtitles 💬 — English subs for your Downloads</h2>
-            <p>Pick a movie or episode from Downloads, search English subtitles, and save the <code>.srt</code> next to the video with a matching filename — no zips, no renaming.</p>
+            <p>Pick a movie or episode from Downloads, search English subtitles, and save the <code>.srt</code> next to the video with a matching filename — no zips, no renaming. No downloads yet? Just type any title below and hit Search — manual title search needs no files.</p>
           </div>
         </div>
 
@@ -480,8 +481,8 @@
           </div>
           <div class="search-filters-row">
             <div class="search-options">
-              <span class="timeout-label">Title override (optional):</span>
-              <input type="text" id="subtitle-query-override" placeholder="e.g. Dune Part Two" style="min-width:220px" />
+              <span class="timeout-label">Manual title search:</span>
+              <input type="text" id="subtitle-query-override" placeholder="e.g. Dune Part Two — works with no downloads" style="min-width:220px" />
               <button type="button" class="btn btn-secondary btn-sm" onclick="loadSubtitleVideos()" title="Rescan Downloads for videos">↻ Rescan</button>
             </div>
           </div>
@@ -495,7 +496,7 @@
         <div id="subtitle-empty-state" class="search-empty-state">
           <div class="empty-icon">💬</div>
           <h3>Find English subtitles</h3>
-          <p>Select a video above — the title is auto-derived from the filename (S01E02 aware) — then hit Search.</p>
+          <p>Select a video above — the title is auto-derived from the filename (S01E02 aware) — then hit Search. Or skip the dropdown entirely: type any title in Manual title search and hit Search.</p>
         </div>
 
         <div id="subtitle-results-container" class="search-results-container hidden">
@@ -887,6 +888,6 @@
   </div>
 
   <script src="/static/app.js?v=1.0.0"></script>
-  <script src="/static/enhancements.js?v=1.0.0"></script>
+  <script src="/static/enhancements.js?v=1.0.1"></script>
 </body>
 </html>
