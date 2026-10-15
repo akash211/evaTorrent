@@ -1,0 +1,54 @@
+[package]
+name = "evatorrent"
+version = "1.0.0"
+edition = "2021"
+description = "Modern BitTorrent client with Tokio, Email OTP & Google OAuth, parallel downloading, and a sleek Web UI (Rust rewrite)"
+license = "MIT"
+homepage = "https://github.com/akash211/evaTorrent"
+repository = "https://github.com/akash211/evaTorrent"
+
+[[bin]]
+name = "evatorrent"
+path = "src/main.rs"
+
+[lib]
+name = "evatorrent"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "multipart", "macros"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+sha1 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+hmac = "0.12"
+rand = "0.8"
+regex = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+bytes = "1.6"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+zip = "2.1"
+sysinfo = "0.32"
+tempfile = "3.10"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+strip = true

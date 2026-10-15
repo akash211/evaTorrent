@@ -1,62 +1,12 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual environments
-.venv/
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-.env
-
-# Testing & Coverage
-.coverage
-htmlcov/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# IDEs & OS
+/target/
+**/*.rs.bk
 .DS_Store
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Downloads / Torrents data
 downloads/
-*.torrent
-torrents/
-
-# AI documentation (local only)
-AGENTS.md
-
-# Understand-Anything knowledge graph (local only, regenerated via /understand)
-.ua/
-
-# Playwright local artifacts
-.playwright/
-.playwright-cli/
-
+data/
+*.db
+*.db-shm
+*.db-wal
+.env
+.heartbeat
+.clean_shutdown
+.evatorrent/
