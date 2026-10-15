@@ -1,7 +1,7 @@
 services:
   evatorrent:
     build: .
-    image: akashkece/evatorrent:1.0.0-rust
+    image: akashkece/evatorrent:1.0.0
     container_name: evatorrent
     restart: unless-stopped
     ports:
