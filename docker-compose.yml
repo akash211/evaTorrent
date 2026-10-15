@@ -1,6 +1,5 @@
 services:
   evatorrent:
-    build: .
     image: akashkece/evatorrent:1.0.0
     container_name: evatorrent
     restart: unless-stopped
@@ -28,7 +27,9 @@ services:
       - SMTP_PASSWORD=
       - SMTP_FROM=
       # Optional Discover enrichment (no key required for base lookup)
+      # TMDB key unlocks accurate budget/box-office + India OTT providers
       - TMDB_API_KEY=
+      # OMDb key unlocks IMDb/RT ratings, box office, languages
       - OMDB_API_KEY=
       # Resource safety (large torrents): unset = built-in defaults
       - EVA_MAX_PEERS=
@@ -37,5 +38,7 @@ services:
       - EVA_STREAM_BUFFER_LIMIT=
       - EVA_TELEMETRY_SECS=
       - EVA_VERIFY_ON_STARTUP=
+      # Seconds between [PROGRESS] docker-log lines per torrent (0 disables)
       - EVA_PROGRESS_LOG_SECS=
+      # Optional keyed subtitle provider (keyless Yify first)
       - OPENSUBTITLES_API_KEY=

@@ -2,6 +2,7 @@ target/
 .git/
 downloads/
 data/
+.evatorrent/
 *.db
 *.db-shm
 *.db-wal

@@ -55,7 +55,13 @@ Open **[http://127.0.0.1:8080](http://127.0.0.1:8080)** in your browser.
 ## Quickstart with Docker Compose 🐳
 
 ```bash
-docker compose up --build -d
+docker compose up -d
+```
+
+Open **[http://localhost:8080](http://localhost:8080)**.
+If SMTP is not configured, view your login OTP anytime via:
+```bash
+docker compose logs -f evatorrent
 ```
 
 ---
