@@ -4,10 +4,23 @@ FROM rust:bookworm AS builder
 WORKDIR /usr/src/evatorrent
 
 # Cache dependencies (Cargo.toml + lockfile first for better layer caching)
+# Compile ONLY the dependency graph against throwaway stub sources.
+#
+# CRITICAL (stub-binary leak guard): the stub's bin/lib outputs and their cargo
+# fingerprints are deleted afterwards. BuildKit's later `COPY src/` preserves
+# the *older* checkout mtimes, and cargo only invalidates a unit when a source
+# is NEWER than its dep-info anchor (backward mtime = "fresh"). Without this
+# deletion the real `cargo build --release --bin evatorrent` below considers
+# everything fresh, relinks nothing, and a 324 KB `fn main() {}` stub binary
+# ships in the image (silently broke akashkece/evatorrent:1.0.0/latest on
+# 2026-10-16; the container then exits in milliseconds with no logs).
 COPY Cargo.toml Cargo.lock* ./
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs && printf "// lib\n" > src/lib.rs \
     && cargo build --release \
-    && rm -rf src
+    && rm -rf src \
+    && rm -rf target/release/evatorrent target/release/libevatorrent.rlib \
+       target/release/deps/evatorrent-* target/release/deps/libevatorrent-* \
+       target/release/.fingerprint/evatorrent-*
 
 # Copy actual source code and build release binary
 COPY src/ ./src/

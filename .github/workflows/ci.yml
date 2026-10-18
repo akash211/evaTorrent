@@ -74,5 +74,51 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Dedicated scope: keeps the rust-rewrite layer chains isolated from
+          # the stale python-era blobs still sitting in the repo GHA cache
+          # (that pipeline's Dockerfile/workflow differ, so blind reuse is unsafe).
+          cache-from: type=gha,scope=evatorrent-rust
+          cache-to: type=gha,mode=max,scope=evatorrent-rust
+
+      # Regression gate for the 2026-10-16 incident where dependency-cache stub
+      # compilation shipped a `fn main() {}` binary as the engine: CI was green,
+      # image pushed, container exited instantly with no logs.
+      - name: Verify Runtime Image (stub-binary regression gate)
+        run: |
+          IMAGE="akashkece/evatorrent:sha-${GITHUB_SHA::7}"
+          docker pull "$IMAGE"
+
+          # 1) Binary sanity: must be the real engine (multi-MB), not a ~324 KB
+          #    `fn main() {}` stub.
+          BINSIZE=$(docker run --rm --entrypoint stat "$IMAGE" -c %s /usr/local/bin/evatorrent)
+          echo "evatorrent binary size: ${BINSIZE:-0} bytes"
+          if [ "${BINSIZE:-0}" -lt 1048576 ]; then
+            echo "::error::evatorrent binary is only ${BINSIZE:-0} bytes - stub build leaked into image"
+            exit 1
+          fi
+
+          # 2) Boot test: the web server must start and answer the health
+          #    endpoint. A no-op stub exits within milliseconds with no logs.
+          docker run --rm -d --name eva-smoke --publish 18080:8080 "$IMAGE"
+          ok=""
+          for _ in $(seq 1 30); do
+            if ! docker ps --filter name=eva-smoke --format '{{.Status}}' | grep -q '^Up'; then
+              echo "::error::Container exited immediately (stub/no-op binary):"
+              docker logs eva-smoke || true
+              docker rm -f eva-smoke >/dev/null 2>&1 || true
+              exit 1
+            fi
+            if curl -fsS http://127.0.0.1:18080/api/auth/status >/dev/null 2>&1; then
+              ok=yes
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::Smoke test failed: /api/auth/status never responded"
+            docker logs eva-smoke || true
+            docker rm -f eva-smoke >/dev/null 2>&1 || true
+            exit 1
+          fi
+          echo "Smoke test passed: binary boots and serves /api/auth/status"
+          docker stop eva-smoke >/dev/null
